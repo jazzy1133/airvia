@@ -301,8 +301,8 @@ $BUILD_TOOLS/aapt2 link \
   --rename-manifest-package com.opus.airvia \
   --min-sdk-version 29 \
   --target-sdk-version 34 \
-  --version-code 5 \
-  --version-name "1.2.2" \
+  --version-code 6 \
+  --version-name "1.2.3" \
   $BUILD/res-out/*.flat $UI_RES_FLATS
 
 # Fix: Generate material3 R with REAL IDs from aapt2's output.
