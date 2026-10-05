@@ -190,6 +190,10 @@ object Ap2Pairing {
         val head =
             "$requestLine\r\n" +
                 "Host: $host\r\n" +
+                // HomePod OS 27 rejects plaintext pairing requests with no
+                // User-Agent (HTTP 403 before any TLV). The version must look
+                // like a real AirPlay sender; matches Ap2AudioSession stdHeaders().
+                "User-Agent: AirPlay/550.10\r\n" +
                 "X-Apple-HKP: 4\r\n" +
                 "Content-Type: application/octet-stream\r\n" +
                 "Content-Length: ${body.size}\r\n" +
