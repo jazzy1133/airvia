@@ -38,7 +38,7 @@ Whatever app you're playing in — your music player, podcast app, YouTube, brow
 **Download & source**
 Free, no ads, no account, no trial — MIT licensed.
 GitHub: https://github.com/jazzy1133/airvia
-Latest release (v1.2.2): https://github.com/jazzy1133/airvia/releases/tag/v1.2.2
+Latest release: https://github.com/jazzy1133/airvia/releases/latest
 
 Contributors are welcome — issues with your speaker model and a log from the app's Log tab genuinely help, and PRs are reviewed with thanks.
 
