@@ -18,6 +18,7 @@ import com.opus.airvia.Speaker
 import com.opus.airvia.SpeakerKind
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicReference
 
 /**
@@ -38,6 +39,37 @@ import java.util.concurrent.atomic.AtomicReference
  */
 object CastIntegration {
 
+    /**
+     * Set once the Cast framework module turns out to be absent (phones
+     * without Google Play services, e.g. LineageOS): discovery is polled
+     * on a timer, and without this latch every poll re-threw and spammed
+     * the log with a multi-line DynamiteModule stack message that reads
+     * like a discovery failure even though AirPlay/DLNA are unaffected.
+     */
+    private val moduleMissing = AtomicBoolean(false)
+
+    private fun isModuleMissing(t: Throwable): Boolean {
+        var cur: Throwable? = t
+        while (cur != null) {
+            val n = cur.javaClass.name
+            if (n.contains("ModuleUnavailable") || n.contains("DynamiteModule")) return true
+            cur = cur.cause
+        }
+        return false
+    }
+
+    /** Note a missing Cast module once; returns true when [t] is that case. */
+    private fun noteModuleMissing(t: Throwable): Boolean {
+        if (!isModuleMissing(t)) return false
+        if (moduleMissing.compareAndSet(false, true)) {
+            LogBus.log(
+                "[cast] Chromecast unavailable on this phone (no Google Play " +
+                    "services) — AirPlay, Sonos and DLNA are unaffected",
+            )
+        }
+        return true
+    }
+
     /** Entry point for CastService's reflection registration. */
     @JvmStatic
     fun starter(context: Context): ((Speaker, String) -> CastEngine.LiveSession?)? {
@@ -48,7 +80,9 @@ object CastIntegration {
                 startSession(context.applicationContext, speaker, streamUrl)
             })
         } catch (t: Throwable) {
-            LogBus.log("[cast] Cast SDK unavailable: ${t.message}")
+            if (!noteModuleMissing(t)) {
+                LogBus.log("[cast] Cast SDK unavailable: ${t.message}")
+            }
             null
         }
     }
@@ -56,11 +90,14 @@ object CastIntegration {
     /** Entry point for MainActivity's reflection discovery. */
     @JvmStatic
     fun discover(context: Context): List<Speaker> {
+        if (moduleMissing.get()) return emptyList()
         val app = context.applicationContext
         return try {
             discoverRoutes(app, 3500)
         } catch (t: Throwable) {
-            LogBus.log("[cast] discovery failed: ${t.message}")
+            if (!noteModuleMissing(t)) {
+                LogBus.log("[cast] discovery failed: ${t.message}")
+            }
             emptyList()
         }
     }
