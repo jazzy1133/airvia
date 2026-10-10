@@ -14,6 +14,21 @@ data class Speaker(val name: String, val host: String, val port: Int) {
     /** RAOP TXT `et` encryption modes (AirPlay discovery), when known. */
     var et: String? = null
 
+    /**
+     * Port of the same device's `_raop._tcp` service when it differs from
+     * [port] (split-service receivers like Kodi/LibreELEC advertise AirPlay
+     * and RAOP on different ports). The RAOP failover must target this port;
+     * null means RAOP lives on [port] itself (Apple receivers, RAOP-only
+     * devices).
+     */
+    var raopPort: Int? = null
+
+    /** `et` modes taken from the `_raop._tcp` TXT, when a sibling exists. */
+    var raopEt: String? = null
+
+    /** Discovery-internal: this raw entry came from `_raop._tcp`. */
+    var isRaopService: Boolean = false
+
     /** DLNA control endpoints (kind == DLNA). */
     var dlna: com.opus.airvia.dlna.Dlna.DlnaDevice? = null
 
@@ -32,11 +47,16 @@ data class Speaker(val name: String, val host: String, val port: Int) {
 enum class SpeakerKind { AIRPLAY, DLNA, CHROMECAST }
 
 /**
- * NSD discovery of AirPlay receivers (`_raop._tcp`, with `_airplay._tcp`
- * merged in and de-duplicated by endpoint — a HomePod advertises both).
- * Resolves services one at a time (NSD resolves are not parallel-safe on
- * older Android), preferring the clean `_airplay` display name over the
- * `MAC@Name` form `_raop` uses.
+ * NSD discovery of AirPlay receivers (`_raop._tcp` and `_airplay._tcp`).
+ * Raw services are keyed by endpoint; the published list merges the two
+ * services of one physical device (same host + cleaned name) into a
+ * single [Speaker] whose [Speaker.port] is the AirPlay endpoint and
+ * whose [Speaker.raopPort] remembers the RAOP endpoint when it differs
+ * (Kodi/LibreELEC: AirPlay on one port, RAOP on another — the RAOP
+ * failover breaks if it reuses the AirPlay port). Resolves services one
+ * at a time (NSD resolves are not parallel-safe on older Android),
+ * preferring the clean `_airplay` display name over the `MAC@Name` form
+ * `_raop` uses.
  */
 class SpeakerDiscovery(
     context: Context,
@@ -138,6 +158,7 @@ class SpeakerDiscovery(
                     if (host != null) {
                         val name = cleanName(info.serviceName)
                         val key = endpoint(host, info.port)
+                        val isRaop = info.serviceType?.contains("_raop") == true
                         val et = try {
                             info.attributes["et"]?.toString(Charsets.UTF_8)
                         } catch (_: Exception) {
@@ -149,6 +170,7 @@ class SpeakerDiscovery(
                             if (existing == null || existing.name.contains("@")) {
                                 byEndpoint[key] = Speaker(name, host, info.port).apply {
                                     this.et = et
+                                    this.isRaopService = isRaop
                                 }
                             } else if (existing.et == null && et != null) {
                                 existing.et = et
@@ -172,12 +194,45 @@ class SpeakerDiscovery(
     }
 
     private fun publish() {
-        val list = synchronized(byEndpoint) { byEndpoint.values.toList() }
-        onChanged(list)
+        val raw = synchronized(byEndpoint) { byEndpoint.values.toList() }
+        onChanged(mergeDeviceSpeakers(raw))
     }
 
     private fun endpoint(host: String, port: Int) = "$host:$port"
 
     private fun cleanName(raw: String): String =
         if (raw.contains("@")) raw.substringAfterLast("@").trim() else raw.trim()
+}
+
+/**
+ * Merge the raw `_airplay._tcp` / `_raop._tcp` entries of one physical
+ * device (same host + cleaned display name) into a single [Speaker]:
+ * the AirPlay entry is primary ([Speaker.port] is the AP2 target), and
+ * a RAOP sibling on a different port is remembered in
+ * [Speaker.raopPort] / [Speaker.raopEt] so the RAOP failover can aim at
+ * the right endpoint. Devices advertising only one service pass through
+ * unchanged. First-seen device order is preserved.
+ */
+internal fun mergeDeviceSpeakers(raw: List<Speaker>): List<Speaker> {
+    val groups = LinkedHashMap<String, MutableList<Speaker>>()
+    for (sp in raw) {
+        val key = "${sp.host.lowercase()}|${sp.name.lowercase()}"
+        groups.getOrPut(key) { ArrayList() }.add(sp)
+    }
+    val out = ArrayList<Speaker>(groups.size)
+    for (group in groups.values) {
+        val airplay = group.firstOrNull { !it.isRaopService }
+        val raop = group.firstOrNull { it.isRaopService }
+        val primary = airplay ?: raop ?: continue
+        val merged = Speaker(primary.name, primary.host, primary.port)
+        merged.kind = primary.kind
+        merged.et = primary.et ?: raop?.et
+        merged.isRaopService = primary.isRaopService
+        if (airplay != null && raop != null && raop.port != primary.port) {
+            merged.raopPort = raop.port
+            merged.raopEt = raop.et
+        }
+        out.add(merged)
+    }
+    return out
 }
