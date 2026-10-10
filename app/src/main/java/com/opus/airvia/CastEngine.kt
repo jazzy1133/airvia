@@ -425,7 +425,17 @@ object CastEngine {
 
     private fun runRaop(ss: SpeakerSession, consumer: BroadcastCapture.Consumer) {
         val sp = ss.speaker
-        val etModes = sp.et?.split(',')?.map { it.trim() }?.toSet() ?: emptySet()
+        // Split-service receivers (Kodi/LibreELEC, shairport) advertise
+        // RAOP on a different port than AirPlay — the failover must aim
+        // there, not at the AirPlay port that just rejected AP2 pairing.
+        val targetPort = sp.raopPort ?: sp.port
+        if (targetPort != sp.port) {
+            LogBus.log(
+                "[engine] '${sp.name}' RAOP service is on port $targetPort " +
+                    "(AirPlay port ${sp.port}) — failing over there",
+            )
+        }
+        val etModes = (sp.raopEt ?: sp.et)?.split(',')?.map { it.trim() }?.toSet() ?: emptySet()
         val attempts = when {
             "1" in etModes && "0" in etModes -> listOf(true, false)
             "1" in etModes -> listOf(true)
@@ -435,7 +445,7 @@ object CastEngine {
         var lastFailure: Exception? = null
         for (encrypt in attempts) {
             if (ss.stopRequested) return
-            val conn = RaopConnection(sp.host, sp.port, NetUtil.localIp(), encrypt)
+            val conn = RaopConnection(sp.host, targetPort, NetUtil.localIp(), encrypt)
             try {
                 conn.connect()
                 if (ss.stopRequested) {
