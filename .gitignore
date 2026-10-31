@@ -1,3 +1,7 @@
 build/
 *.apk
 *.idsig
+libs/
+build-manual/
+dist/
+scripts/.pomcache/

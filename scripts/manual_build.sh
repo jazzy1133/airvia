@@ -3,15 +3,29 @@
 # Requires: JDK 17, Android SDK, kotlin-compiler-embeddable 2.4.21, dependencies in libs/
 set -euo pipefail
 
-TOOLCHAIN=~/airvia-toolchain
-export JAVA_HOME=$(echo $TOOLCHAIN/jdk-17*/Contents/Home)
-export PATH=$JAVA_HOME/bin:$PATH
-
 PROJECT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 export PROJECT
+case "$PROJECT" in
+  *[[:space:]]*)
+    echo "FATAL: project path contains whitespace ($PROJECT); the build is not" \
+         "quote-safe. Move/clone the repo to a path without spaces." >&2
+    exit 1;;
+esac
+
+# Toolchain installed by scripts/setup_toolchain.sh (override with AIRVIA_TOOLCHAIN).
+TOOLCHAIN=${AIRVIA_TOOLCHAIN:-$HOME/airvia-toolchain}
+for j in "$TOOLCHAIN"/jdk-17*/Contents/Home "$TOOLCHAIN"/jdk-17*; do
+  if [ -x "$j/bin/java" ]; then JAVA_HOME=$j; break; fi
+done
+if [ -z "${JAVA_HOME:-}" ] || [ ! -x "$JAVA_HOME/bin/java" ]; then
+  echo "FATAL: no JDK 17 found. Run scripts/setup_toolchain.sh or set JAVA_HOME." >&2
+  exit 1
+fi
+export JAVA_HOME
+export PATH=$JAVA_HOME/bin:$PATH
 LIBS=$PROJECT/libs
 BUILD=$PROJECT/build-manual
-ANDROID_SDK=${ANDROID_SDK:-$HOME/Library/Android/sdk}
+ANDROID_SDK=${ANDROID_SDK:-${ANDROID_HOME:-${ANDROID_SDK_ROOT:-$HOME/Library/Android/sdk}}}
 PLATFORM=$ANDROID_SDK/platforms/android-36/android.jar
 BUILD_TOOLS=$ANDROID_SDK/build-tools/36.0.0
 # Kotlin 2.4.21 via kotlin-compiler-embeddable (has org.jetbrains.kotlin.com.intellij shading
@@ -21,6 +35,10 @@ K2_LIB=$TOOLCHAIN/kotlinc/lib
 EMBED_JAR=$TOOLCHAIN/kplugins/embed/kotlin-compiler-embeddable-$KV.jar
 RUNCP="$EMBED_JAR:$K2_LIB/kotlin-stdlib.jar:$K2_LIB/kotlinx-coroutines-core-jvm.jar:$K2_LIB/annotations-13.0.jar:$K2_LIB/kotlin-reflect.jar:$K2_LIB/kotlin-script-runtime.jar"
 KOTLINC="java -cp $RUNCP org.jetbrains.kotlin.cli.jvm.K2JVMCompiler"
+
+for need in "$PLATFORM" "$BUILD_TOOLS/aapt2" "$EMBED_JAR"; do
+  [ -e "$need" ] || { echo "FATAL: missing $need (see README / scripts/setup_toolchain.sh)" >&2; exit 1; }
+done
 
 mkdir -p $BUILD/{classes,res-flat,dex,apk,aar-extract}
 
@@ -143,17 +161,13 @@ def index_res_dir(resdir, owner):
 
 def remove_named_element(content, t, n):
     """Remove the <t name="n">...</t> or <t name="n"/> element. Returns new content."""
-    # Block form
-    pattern = r'\s*<%s\s[^>]*?\bname="%s"[^>]*?(?<!/)>.*?</%s>' % (t, re.escape(n), t)
-    # Self-closing form first, so the block form can't swallow siblings.
-    content, cnt0 = re.subn(r'\s*<%s\s[^>]*?\bname="%s"[^>]*/>' % (t, re.escape(n)), '', content)
-    if cnt0:
+    name = re.escape(n)
+    # Self-closing first, so the block form below can't swallow siblings.
+    content, cnt = re.subn(r'\s*<%s\s[^>]*?\bname="%s"[^>]*/>' % (t, name), '', content)
+    if cnt:
         return content
-    content, cnt = re.subn(pattern, '', content, flags=re.DOTALL)
-    if cnt == 0:
-        # Self-closing form (attributes may follow the name)
-        pattern2 = r'\s*<%s\s[^>]*?\bname="%s"[^>]*/>' % (t, re.escape(n))
-        content, _ = re.subn(pattern2, '', content)
+    content, _ = re.subn(r'\s*<%s\s[^>]*?\bname="%s"[^>]*?(?<!/)>.*?</%s>' % (t, name, t),
+                         '', content, flags=re.DOTALL)
     return content
 
 # The app's own resources win over all libraries (standard Android priority).
@@ -451,7 +465,12 @@ echo "=== Step 8: Zipalign ==="
 $BUILD_TOOLS/zipalign -f 4 $BUILD/apk/airvia-unsigned.apk $BUILD/apk/airvia-aligned.apk
 
 echo "=== Step 9: Sign with debug key ==="
-KEYSTORE=$BUILD/debug.keystore
+# Stable key OUTSIDE the repo/build dir so rebuilds keep the same signature
+# (a changed key makes Android refuse to update an installed copy).
+KEYSTORE=${AIRVIA_KEYSTORE:-$HOME/.airvia/debug.keystore}
+LEGACY_KEYSTORE=$HOME/workspace/jazzy/build-manual/debug.keystore
+if [ ! -f "$KEYSTORE" ] && [ -f "$LEGACY_KEYSTORE" ]; then KEYSTORE=$LEGACY_KEYSTORE; fi
+mkdir -p "$(dirname "$KEYSTORE")"
 if [ ! -f "$KEYSTORE" ]; then
   $JAVA_HOME/bin/keytool -genkeypair -keystore $KEYSTORE -alias androiddebugkey \
     -storepass android -keypass android -keyalg RSA -keysize 2048 -validity 10950 \

@@ -70,7 +70,7 @@ class MainActivity : ComponentActivity() {
     private var portInput by mutableStateOf("7000")
     private var sleepMinutes by mutableStateOf(CastEngine.sleepMinutes)
     private var lastSpeaker by mutableStateOf<Speaker?>(null)
-    private var airplayMode by mutableStateOf(CastEngine.AirPlayMode.AUTO)
+    private var airplayMode by mutableStateOf(AirPlayMode.AUTO)
     private var eqGains by mutableStateOf(DoubleArray(DspProcessor.BAND_COUNT))
     private var eqPreamp by mutableStateOf(0.0)
     private var nowPlaying by mutableStateOf<NowPlayingInfo?>(null)

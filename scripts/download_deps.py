@@ -25,6 +25,13 @@ CENTRAL = "https://repo1.maven.org/maven2"
 REPOS = [GOOGLE, CENTRAL]
 NS = {"m": "http://maven.apache.org/POM/4.0.0"}
 
+LIFECYCLE_VERSION = "2.11.0"
+
+# Artifacts folded into another artifact in newer releases.
+MERGED_INTO_NEWER = {
+    ("androidx.activity", "activity-ktx"): "merged into activity 1.8+",
+}
+
 ANDROID_GROUP_PREFIXES = ("androidx.", "com.google.android.", "com.google.firebase",
                          "com.google.accompanist", "io.coil-kt")
 
@@ -414,29 +421,20 @@ def main():
     evict(("com.google.guava", "listenablefuture"),
           ("com.google.guava", "guava"))
 
-    # 3c. Pin lifecycle-livedata-core to 2.7.0.
-    # D8 8.2.2 NPEs on LiveData$1.class inside the 2.8.3 AAR, which aborts the
-    # whole dex step. The 2.7.0 AAR is already vendored in libs/ and is the
-    # version 1.0.6 shipped with. It IS needed (Navigation Compose uses
-    # MutableLiveData), so exclusion is not an option.
-    chosen[("androidx.lifecycle", "lifecycle-livedata-core")] = "2.7.0"
-    log("Pinned androidx.lifecycle:lifecycle-livedata-core to 2.7.0 (D8 8.2.2 NPE on 2.8.3)")
-
-    # 3d2. Lifecycle 2.8.x split: the real viewmodel classes (incl.
-    # ViewModelKt/viewModelScope) live in lifecycle-viewmodel-android:2.8.3;
-    # the bare lifecycle-viewmodel:2.8.3 artifact is an empty stub. A stale
-    # 2.6.1 floor version elsewhere in the graph can win first-seen for the
-    # bare/lifecycle-viewmodel-ktx names, and those 2.6.1 AARs carry real
-    # classes that DUPLICATE the -android ones at dex time (29 + 1 dupes).
-    # Gradle resolves the -android variant; mirror that explicitly.
-    chosen[("androidx.lifecycle", "lifecycle-viewmodel-android")] = "2.8.3"
-    log("Pinned androidx.lifecycle:lifecycle-viewmodel-android to 2.8.3 (2.8.x split; stub bare artifact)")
+    # 3c. Keep every androidx.lifecycle artifact on ONE version. The old
+    # per-artifact pins (2.7.0 / 2.8.3) existed for a D8 8.2.2 NPE that the
+    # current build-tools no longer have, and mixing lifecycle versions risks
+    # NoSuchMethodError at runtime. Since 2.8 the real viewmodel classes live
+    # in lifecycle-viewmodel-android; the bare/-ktx artifacts duplicate them.
+    for (g, a) in list(chosen):
+        if g == "androidx.lifecycle":
+            chosen[(g, a)] = LIFECYCLE_VERSION
     for _old in [("androidx.lifecycle", "lifecycle-viewmodel"),
                  ("androidx.lifecycle", "lifecycle-viewmodel-ktx")]:
         if _old in chosen:
-            log(f"Evicting obsolete {_old[0]}:{_old[1]}:{chosen[_old]} "
-                f"(superseded by lifecycle-viewmodel-android:2.8.3)")
+            log(f"Evicting obsolete {_old[0]}:{_old[1]} (superseded by lifecycle-viewmodel-android)")
             del chosen[_old]
+    chosen[("androidx.lifecycle", "lifecycle-viewmodel-android")] = LIFECYCLE_VERSION
 
     # 3d. Repair versions stomped by the Cast SDK subtree's stale floor versions.
     # play-services-cast-framework:21.4.0 declares androidx.appcompat:appcompat:1.0.0
@@ -456,18 +454,16 @@ def main():
             log(f"Pinned {g}:{a} to {v} (was {chosen[(g, a)]}, stomped by Cast subtree)")
             chosen[(g, a)] = v
 
-    # 3e. activity-ktx was merged into activity (1.8+). A stale activity-ktx
-    # floor from the Cast subtree would duplicate those classes at dex time.
-    if ("androidx.activity", "activity-ktx") in chosen:
-        log("Evicting androidx.activity:activity-ktx (merged into activity 1.8+)")
-        del chosen[("androidx.activity", "activity-ktx")]
-
-    # 3f. Gradle module metadata resolves X-jvm to X-android on Android; this
-    # resolver sees both and they duplicate classes at dex time.
+    # 3e. Artifacts that duplicate classes at dex time because this resolver
+    # is first-seen-wins (Gradle is highest-wins and follows module metadata).
+    for (g, a), why in MERGED_INTO_NEWER.items():
+        if (g, a) in chosen:
+            log(f"Evicting {g}:{a} ({why})")
+            del chosen[(g, a)]
     for (g, a) in list(chosen):
         if g.startswith("androidx.") and a.endswith("-jvm") and \
                 (g, a[:-4] + "-android") in chosen:
-            log(f"Evicting {g}:{a} (superseded by {a[:-4]}-android)")
+            log(f"Evicting {g}:{a} (Gradle resolves it to {a[:-4]}-android)")
             del chosen[(g, a)]
 
     # 4. Download artifacts (AAR for Android groups, JAR otherwise).

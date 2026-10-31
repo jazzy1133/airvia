@@ -69,8 +69,8 @@ fun CastScreen(
     sleepMinutes: Int,
     onSleepTimer: (Int) -> Unit,
     lastSpeaker: Speaker?,
-    airplayMode: CastEngine.AirPlayMode,
-    onAirplayMode: (CastEngine.AirPlayMode) -> Unit,
+    airplayMode: AirPlayMode,
+    onAirplayMode: (AirPlayMode) -> Unit,
 ) {
     LazyColumn(
         modifier = Modifier
@@ -540,8 +540,8 @@ private fun IpConnectCard(
 @Composable
 @OptIn(androidx.compose.material3.ExperimentalMaterial3Api::class)
 private fun AirPlayModeCard(
-    mode: CastEngine.AirPlayMode,
-    onChange: (CastEngine.AirPlayMode) -> Unit,
+    mode: AirPlayMode,
+    onChange: (AirPlayMode) -> Unit,
 ) {
     Card(
         modifier = Modifier.fillMaxWidth(),
@@ -555,7 +555,7 @@ private fun AirPlayModeCard(
             )
             Spacer(Modifier.height(8.dp))
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                for (m in CastEngine.AirPlayMode.values()) {
+                for (m in AirPlayMode.entries) {
                     androidx.compose.material3.FilterChip(
                         selected = mode == m,
                         onClick = { onChange(m) },
@@ -566,13 +566,13 @@ private fun AirPlayModeCard(
             Spacer(Modifier.height(6.dp))
             Text(
                 when (mode) {
-                    CastEngine.AirPlayMode.AUTO ->
+                    AirPlayMode.AUTO ->
                         "Tries AirPlay 2, falls back to AirPlay 1 if it fails."
-                    CastEngine.AirPlayMode.AIRPLAY2 ->
+                    AirPlayMode.AIRPLAY2 ->
                         "AirPlay 2 only (HomePod, newer receivers). No fallback."
-                    CastEngine.AirPlayMode.AIRPLAY1 ->
+                    AirPlayMode.AIRPLAY1 ->
                         "Classic AirPlay 1 / RAOP only (older receivers, Kodi, shairport)."
-                },
+                } + " Applies to the next cast.",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )

@@ -17,4 +17,4 @@ mkdir -p dist
 cp build-manual/apk/airvia.apk dist/Airvia.apk
 echo "=== Airvia APK ready ==="
 ls -lh dist/Airvia.apk
-shasum -a 256 dist/Airvia.apk
+(sha256sum dist/Airvia.apk 2>/dev/null || shasum -a 256 dist/Airvia.apk)

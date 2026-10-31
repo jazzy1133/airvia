@@ -32,7 +32,7 @@ Android-to-speaker casting apps have been around for years, but:
   (Android 10+; no root) — or only the apps you pick (per-app capture)
 - True AirPlay 2: transient HAP pairing (SRP), ChaCha20-Poly1305 channels,
   ALAC audio at 44.1 kHz, NTP timing + sync, retransmit handling — with a
-  classic AirPlay 1 / RAOP fallback for older receivers
+  classic AirPlay 1 / RAOP fallback for older receivers; pick Auto, AirPlay 2 only or AirPlay 1 only in the Cast tab
 - **Multi-speaker**: cast to several speakers at once; each speaker has
   its **own volume slider** and remembers its level
 - **DLNA / Sonos and Chromecast** via the built-in local stream server
@@ -62,12 +62,23 @@ Android-to-speaker casting apps have been around for years, but:
 
 ## Building
 
-No Gradle — a single shell script (JDK 17 + Android SDK 34 +
-kotlin-compiler-embeddable 2.1.0):
+No Gradle — shell scripts only. Requirements:
+
+- JDK 17, Kotlin 2.4.21 (kotlin-compiler-embeddable + Compose plugin):
+  `scripts/setup_toolchain.sh` installs both into `~/airvia-toolchain`
+  (macOS or Linux; override with `AIRVIA_TOOLCHAIN`)
+- Android SDK with platform `android-36` and build-tools `36.0.0`
+  (`ANDROID_HOME`, default `~/Library/Android/sdk`)
+- A checkout path without spaces
 
 ```sh
-./build.sh
+scripts/setup_toolchain.sh   # first time only
+./build.sh                   # APK lands in dist/Airvia.apk
 ```
+
+The debug signing key is kept at `~/.airvia/debug.keystore` (override with
+`AIRVIA_KEYSTORE`) so rebuilds stay installable over each other.
+
 
 JVM self-tests for the crypto/protocol stack and the 48→44.1 kHz
 resampler live in `tests/` and run on any JVM.

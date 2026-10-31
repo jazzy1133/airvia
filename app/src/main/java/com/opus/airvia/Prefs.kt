@@ -50,14 +50,10 @@ object Prefs {
 
     // --- AirPlay protocol ------------------------------------------------
 
-    fun airplayMode(ctx: Context): CastEngine.AirPlayMode =
-        runCatching {
-            CastEngine.AirPlayMode.valueOf(
-                prefs(ctx).getString("airplay_mode", null) ?: "AUTO",
-            )
-        }.getOrDefault(CastEngine.AirPlayMode.AUTO)
+    fun airplayMode(ctx: Context): AirPlayMode =
+        AirPlayMode.fromName(prefs(ctx).getString("airplay_mode", null))
 
-    fun saveAirplayMode(ctx: Context, mode: CastEngine.AirPlayMode) {
+    fun saveAirplayMode(ctx: Context, mode: AirPlayMode) {
         prefs(ctx).edit().putString("airplay_mode", mode.name).apply()
     }
 

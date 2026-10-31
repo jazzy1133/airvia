@@ -129,6 +129,9 @@ class CastService : Service() {
         if (speaker.kind == SpeakerKind.AIRPLAY) {
             Prefs.saveLastSpeaker(this, speaker)
         }
+        // The service can start without MainActivity (QS tile, restart), so
+        // load the saved AirPlay protocol choice here too.
+        CastEngine.airplayMode = Prefs.airplayMode(this)
         CastEngine.startSpeaker(speaker)
         updateNotification()
     }
