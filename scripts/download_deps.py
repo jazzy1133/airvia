@@ -18,8 +18,8 @@ import subprocess
 import xml.etree.ElementTree as ET
 from collections import deque
 
-LIBS_DIR = os.path.expanduser("~/workspace/airvia/libs")
-CACHE_DIR = os.path.expanduser("~/workspace/airvia/scripts/.pomcache")
+LIBS_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "libs")
+CACHE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".pomcache")
 GOOGLE = "https://dl.google.com/dl/android/maven2"
 CENTRAL = "https://repo1.maven.org/maven2"
 REPOS = [GOOGLE, CENTRAL]
@@ -335,7 +335,7 @@ def main():
     log("== Airvia dependency downloader ==")
 
     # 1. Fetch the Compose BOM to get managed versions.
-    bom_g, bom_a, bom_v = "androidx.compose", "compose-bom", "2024.10.00"
+    bom_g, bom_a, bom_v = "androidx.compose", "compose-bom", "2026.09.00"
     log(f"Fetching BOM {bom_g}:{bom_a}:{bom_v} ...")
     bprops, bmgmt = effective_data(bom_g, bom_a, bom_v)
 
@@ -354,16 +354,16 @@ def main():
 
     # 2. Direct dependencies.
     direct = [
-        ("androidx.core", "core-ktx", "1.13.1"),
-        ("androidx.lifecycle", "lifecycle-runtime-ktx", "2.8.3"),
-        ("androidx.activity", "activity-compose", "1.9.2"),
+        ("androidx.core", "core-ktx", "1.19.1"),
+        ("androidx.lifecycle", "lifecycle-runtime-ktx", "2.11.0"),
+        ("androidx.activity", "activity-compose", "1.13.0"),
         ("androidx.compose.ui", "ui", bom_ver("ui")),
         ("androidx.compose.ui", "ui-graphics", bom_ver("ui-graphics")),
         ("androidx.compose.material3", "material3", bom_ver("material3", "androidx.compose.material3")),
         ("androidx.compose.material", "material-icons-core",
          bom_ver("material-icons-core", "androidx.compose.material")),
-        ("com.google.android.gms", "play-services-cast-framework", "21.4.0"),
-        ("org.jetbrains.kotlin", "kotlin-stdlib", "2.0.20"),
+        ("com.google.android.gms", "play-services-cast-framework", "23.0.0"),
+        ("org.jetbrains.kotlin", "kotlin-stdlib", "2.4.21"),
     ]
     for g, a, v in direct:
         if not v:
@@ -455,6 +455,20 @@ def main():
         if (g, a) in chosen:
             log(f"Pinned {g}:{a} to {v} (was {chosen[(g, a)]}, stomped by Cast subtree)")
             chosen[(g, a)] = v
+
+    # 3e. activity-ktx was merged into activity (1.8+). A stale activity-ktx
+    # floor from the Cast subtree would duplicate those classes at dex time.
+    if ("androidx.activity", "activity-ktx") in chosen:
+        log("Evicting androidx.activity:activity-ktx (merged into activity 1.8+)")
+        del chosen[("androidx.activity", "activity-ktx")]
+
+    # 3f. Gradle module metadata resolves X-jvm to X-android on Android; this
+    # resolver sees both and they duplicate classes at dex time.
+    for (g, a) in list(chosen):
+        if g.startswith("androidx.") and a.endswith("-jvm") and \
+                (g, a[:-4] + "-android") in chosen:
+            log(f"Evicting {g}:{a} (superseded by {a[:-4]}-android)")
+            del chosen[(g, a)]
 
     # 4. Download artifacts (AAR for Android groups, JAR otherwise).
     failures = []

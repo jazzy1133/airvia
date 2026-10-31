@@ -69,6 +69,8 @@ fun CastScreen(
     sleepMinutes: Int,
     onSleepTimer: (Int) -> Unit,
     lastSpeaker: Speaker?,
+    airplayMode: CastEngine.AirPlayMode,
+    onAirplayMode: (CastEngine.AirPlayMode) -> Unit,
 ) {
     LazyColumn(
         modifier = Modifier
@@ -134,6 +136,10 @@ fun CastScreen(
                     onVolume = { onVolumeSpeaker(sp, it) },
                 )
             }
+        }
+
+        item {
+            AirPlayModeCard(airplayMode, onAirplayMode)
         }
 
         item {
@@ -527,6 +533,49 @@ private fun IpConnectCard(
             Button(onClick = onConnect, modifier = Modifier.fillMaxWidth()) {
                 Text("Connect")
             }
+        }
+    }
+}
+
+@Composable
+@OptIn(androidx.compose.material3.ExperimentalMaterial3Api::class)
+private fun AirPlayModeCard(
+    mode: CastEngine.AirPlayMode,
+    onChange: (CastEngine.AirPlayMode) -> Unit,
+) {
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(20.dp),
+    ) {
+        Column(Modifier.padding(16.dp)) {
+            Text(
+                "AirPlay protocol",
+                style = MaterialTheme.typography.titleSmall,
+                fontWeight = FontWeight.SemiBold,
+            )
+            Spacer(Modifier.height(8.dp))
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                for (m in CastEngine.AirPlayMode.values()) {
+                    androidx.compose.material3.FilterChip(
+                        selected = mode == m,
+                        onClick = { onChange(m) },
+                        label = { Text(m.label) },
+                    )
+                }
+            }
+            Spacer(Modifier.height(6.dp))
+            Text(
+                when (mode) {
+                    CastEngine.AirPlayMode.AUTO ->
+                        "Tries AirPlay 2, falls back to AirPlay 1 if it fails."
+                    CastEngine.AirPlayMode.AIRPLAY2 ->
+                        "AirPlay 2 only (HomePod, newer receivers). No fallback."
+                    CastEngine.AirPlayMode.AIRPLAY1 ->
+                        "Classic AirPlay 1 / RAOP only (older receivers, Kodi, shairport)."
+                },
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
         }
     }
 }

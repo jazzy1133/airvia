@@ -13,7 +13,8 @@ fi
 
 bash scripts/manual_build.sh
 
-cp build-manual/apk/airvia.apk ~/workspace/your_files/Airvia-1.2.4.apk
+mkdir -p dist
+cp build-manual/apk/airvia.apk dist/Airvia.apk
 echo "=== Airvia APK ready ==="
-ls -lh ~/workspace/your_files/Airvia-1.2.4.apk
-sha256sum ~/workspace/your_files/Airvia-1.2.4.apk
+ls -lh dist/Airvia.apk
+shasum -a 256 dist/Airvia.apk

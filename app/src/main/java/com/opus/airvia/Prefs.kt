@@ -48,6 +48,19 @@ object Prefs {
         return sp
     }
 
+    // --- AirPlay protocol ------------------------------------------------
+
+    fun airplayMode(ctx: Context): CastEngine.AirPlayMode =
+        runCatching {
+            CastEngine.AirPlayMode.valueOf(
+                prefs(ctx).getString("airplay_mode", null) ?: "AUTO",
+            )
+        }.getOrDefault(CastEngine.AirPlayMode.AUTO)
+
+    fun saveAirplayMode(ctx: Context, mode: CastEngine.AirPlayMode) {
+        prefs(ctx).edit().putString("airplay_mode", mode.name).apply()
+    }
+
     // --- EQ ------------------------------------------------------------
 
     fun eqGains(ctx: Context): DoubleArray {

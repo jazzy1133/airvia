@@ -70,6 +70,7 @@ class MainActivity : ComponentActivity() {
     private var portInput by mutableStateOf("7000")
     private var sleepMinutes by mutableStateOf(CastEngine.sleepMinutes)
     private var lastSpeaker by mutableStateOf<Speaker?>(null)
+    private var airplayMode by mutableStateOf(CastEngine.AirPlayMode.AUTO)
     private var eqGains by mutableStateOf(DoubleArray(DspProcessor.BAND_COUNT))
     private var eqPreamp by mutableStateOf(0.0)
     private var nowPlaying by mutableStateOf<NowPlayingInfo?>(null)
@@ -111,6 +112,8 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         PhoneSilencer.healIfStale(this)
         Prefs.loadEq(this)
+        airplayMode = Prefs.airplayMode(this)
+        CastEngine.airplayMode = airplayMode
         eqGains = Prefs.eqGains(this)
         eqPreamp = Prefs.eqPreamp(this)
         selectedApps = Prefs.capturePackages(this)
@@ -337,6 +340,13 @@ class MainActivity : ComponentActivity() {
                         sleepMinutes = sleepMinutes,
                         onSleepTimer = { CastEngine.setSleepTimer(it) },
                         lastSpeaker = lastSpeaker,
+                        airplayMode = airplayMode,
+                        onAirplayMode = {
+                            airplayMode = it
+                            CastEngine.airplayMode = it
+                            Prefs.saveAirplayMode(this@MainActivity, it)
+                            LogBus.log("[ui] AirPlay mode: ${it.label}")
+                        },
                     )
                     1 -> TuneScreen(
                         eqGains = eqGains,

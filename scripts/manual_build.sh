@@ -1,22 +1,25 @@
 #!/bin/bash
 # Manual APK build for Outro (no Gradle)
-# Requires: JDK 17, Android SDK, kotlin-compiler-embeddable 2.1.0, dependencies in libs/
+# Requires: JDK 17, Android SDK, kotlin-compiler-embeddable 2.4.21, dependencies in libs/
 set -euo pipefail
 
-export JAVA_HOME=/home/hatch/jdk/jdk-17.0.20.1+1
+TOOLCHAIN=~/airvia-toolchain
+export JAVA_HOME=$(echo $TOOLCHAIN/jdk-17*/Contents/Home)
 export PATH=$JAVA_HOME/bin:$PATH
 
-PROJECT=~/workspace/airvia
+PROJECT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+export PROJECT
 LIBS=$PROJECT/libs
 BUILD=$PROJECT/build-manual
-ANDROID_SDK=~/android-sdk
-PLATFORM=$ANDROID_SDK/platforms/android-34/android.jar
-BUILD_TOOLS=$ANDROID_SDK/build-tools/34.0.0
-# Kotlin 2.1.0 via kotlin-compiler-embeddable (has org.jetbrains.kotlin.com.intellij shading
+ANDROID_SDK=${ANDROID_SDK:-$HOME/Library/Android/sdk}
+PLATFORM=$ANDROID_SDK/platforms/android-36/android.jar
+BUILD_TOOLS=$ANDROID_SDK/build-tools/36.0.0
+# Kotlin 2.4.21 via kotlin-compiler-embeddable (has org.jetbrains.kotlin.com.intellij shading
 # that the Compose compiler plugin requires; the standalone kotlinc dist does not).
-K2_LIB=~/kotlinc/kotlin-2.1.0/kotlinc/lib
-EMBED_JAR=~/kplugins/embed/kotlin-compiler-embeddable-2.1.0.jar
-RUNCP="$EMBED_JAR:$K2_LIB/kotlin-stdlib.jar:$K2_LIB/kotlinx-coroutines-core-jvm.jar:$K2_LIB/trove4j.jar:$K2_LIB/annotations-13.0.jar:$K2_LIB/kotlin-reflect.jar:$K2_LIB/kotlin-script-runtime.jar"
+KV=2.4.21
+K2_LIB=$TOOLCHAIN/kotlinc/lib
+EMBED_JAR=$TOOLCHAIN/kplugins/embed/kotlin-compiler-embeddable-$KV.jar
+RUNCP="$EMBED_JAR:$K2_LIB/kotlin-stdlib.jar:$K2_LIB/kotlinx-coroutines-core-jvm.jar:$K2_LIB/annotations-13.0.jar:$K2_LIB/kotlin-reflect.jar:$K2_LIB/kotlin-script-runtime.jar"
 KOTLINC="java -cp $RUNCP org.jetbrains.kotlin.cli.jvm.K2JVMCompiler"
 
 mkdir -p $BUILD/{classes,res-flat,dex,apk,aar-extract}
@@ -57,10 +60,10 @@ CP=${CP#:}
 echo "Classpath entries: $(echo $CP | tr ':' '\n' | wc -l)"
 
 echo "=== Step 3: Compile Kotlin sources ==="
-# Compose plugin for Kotlin 2.1.0 (K2-native CompilerPluginRegistrar) via -Xplugin.
-# Serialization plugin from the 2.1.0 dist via -Xplugin.
-COMPOSE_PLUGIN=~/kplugins/kotlin-compose-compiler-plugin-embeddable-2.1.0.jar
-SERIAL_PLUGIN=~/kotlinc/kotlin-2.1.0/kotlinc/lib/kotlin-serialization-compiler-plugin.jar
+# Compose plugin for Kotlin 2.4.21 (K2-native CompilerPluginRegistrar) via -Xplugin.
+# Serialization plugin from the 2.4.21 dist via -Xplugin.
+COMPOSE_PLUGIN=$TOOLCHAIN/kplugins/kotlin-compose-compiler-plugin-embeddable-$KV.jar
+SERIAL_PLUGIN=$K2_LIB/kotlin-serialization-compiler-plugin.jar
 
 PLUGIN_ARGS="-Xplugin=$COMPOSE_PLUGIN -Xplugin=$SERIAL_PLUGIN"
 echo "Using compose plugin: $COMPOSE_PLUGIN"
@@ -102,9 +105,9 @@ echo "Deduplicating AAR resources..."
 python3 << 'PYEOF'
 import os, re, shutil
 
-build = '/home/hatch/workspace/airvia/build-manual'
+build = '' + os.environ['PROJECT'] + '/build-manual'
 aar_base = os.path.join(build, 'aar-extract')
-app_res = '/home/hatch/workspace/airvia/app/src/main/res'
+app_res = '' + os.environ['PROJECT'] + '/app/src/main/res'
 dedup_base = os.path.join(build, 'aar-res-dedup')
 shutil.rmtree(dedup_base, ignore_errors=True)
 os.makedirs(dedup_base, exist_ok=True)
@@ -141,7 +144,11 @@ def index_res_dir(resdir, owner):
 def remove_named_element(content, t, n):
     """Remove the <t name="n">...</t> or <t name="n"/> element. Returns new content."""
     # Block form
-    pattern = r'\s*<%s\s[^>]*?\bname="%s"[^>]*>.*?</%s>' % (t, re.escape(n), t)
+    pattern = r'\s*<%s\s[^>]*?\bname="%s"[^>]*?(?<!/)>.*?</%s>' % (t, re.escape(n), t)
+    # Self-closing form first, so the block form can't swallow siblings.
+    content, cnt0 = re.subn(r'\s*<%s\s[^>]*?\bname="%s"[^>]*/>' % (t, re.escape(n)), '', content)
+    if cnt0:
+        return content
     content, cnt = re.subn(pattern, '', content, flags=re.DOTALL)
     if cnt == 0:
         # Self-closing form (attributes may follow the name)
@@ -227,8 +234,8 @@ mkdir -p $BUILD/r-lib-src
 python3 << 'PYEOF'
 import os, re, glob
 
-aar_extract = os.environ.get('AAR_EXTRACT_DIR', '/home/hatch/workspace/airvia/build-manual/aar-extract')
-out_base = '/home/hatch/workspace/airvia/build-manual/r-lib-src'
+aar_extract = os.environ.get('AAR_EXTRACT_DIR', '' + os.environ['PROJECT'] + '/build-manual/aar-extract')
+out_base = '' + os.environ['PROJECT'] + '/build-manual/r-lib-src'
 
 # All libraries now get real compiled resources above, so NONE need synthetic R.
 # Their R classes are generated with real IDs from aapt2's link output below.
@@ -300,7 +307,7 @@ $BUILD_TOOLS/aapt2 link \
   --java $BUILD/r-src \
   --rename-manifest-package com.opus.airvia \
   --min-sdk-version 29 \
-  --target-sdk-version 34 \
+  --target-sdk-version 36 \
   --version-code 9 \
   --version-name "1.2.4" \
   $BUILD/res-out/*.flat $UI_RES_FLATS
@@ -312,7 +319,7 @@ python3 << 'PYEOF'
 import os, re
 
 # Parse app's R.java for real IDs
-app_r = '/home/hatch/workspace/airvia/build-manual/r-src/com/opus/airvia/R.java'
+app_r = '' + os.environ['PROJECT'] + '/build-manual/r-src/com/opus/airvia/R.java'
 id_map = {}
 with open(app_r) as f:
     content = f.read()
@@ -324,7 +331,7 @@ with open(app_r) as f:
 # from the app's R (aapt2 link output). Package name comes from each AAR's manifest.
 import re as _re
 import glob as _glob2
-for _aardir in _glob2.glob('/home/hatch/workspace/airvia/build-manual/aar-extract/*'):
+for _aardir in _glob2.glob('' + os.environ['PROJECT'] + '/build-manual/aar-extract/*'):
     _libname = os.path.basename(_aardir.rstrip('/'))
     _manifest = os.path.join(_aardir, 'AndroidManifest.xml')
     _r_txt = os.path.join(_aardir, 'R.txt')
@@ -351,7 +358,7 @@ for _aardir in _glob2.glob('/home/hatch/workspace/airvia/build-manual/aar-extrac
         continue
     if not _resources:
         continue
-    _out_dir = '/home/hatch/workspace/airvia/build-manual/r-lib-src/' + _pkg.replace('.', '/')
+    _out_dir = '' + os.environ['PROJECT'] + '/build-manual/r-lib-src/' + _pkg.replace('.', '/')
     os.makedirs(_out_dir, exist_ok=True)
     with open(os.path.join(_out_dir, 'R.java'), 'w') as f:
         f.write(f'package {_pkg};\n\npublic final class R {{\n')
@@ -368,7 +375,7 @@ for _aardir in _glob2.glob('/home/hatch/workspace/airvia/build-manual/aar-extrac
 print(f"Generated real-ID R classes for all AAR libraries")
 # Legacy single-lib block below kept for reference; replaced by loop above.
 if False:
-    r_txt = '/home/hatch/workspace/airvia/build-manual/aar-extract/material3-android-1.3.0/R.txt'
+    r_txt = '' + os.environ['PROJECT'] + '/build-manual/aar-extract/material3-android-1.3.0/R.txt'
     resources = {}
     with open(r_txt) as f:
         for line in f:
@@ -377,7 +384,7 @@ if False:
                 rtype, name = parts[1], parts[2]
                 real_id = id_map.get(name, '0x0')
                 resources.setdefault(rtype, []).append((name, real_id))
-    out_dir = '/home/hatch/workspace/airvia/build-manual/r-lib-src/androidx/compose/material3'
+    out_dir = '' + os.environ['PROJECT'] + '/build-manual/r-lib-src/androidx/compose/material3'
     os.makedirs(out_dir, exist_ok=True)
     with open(os.path.join(out_dir, 'R.java'), 'w') as f:
         f.write('package androidx.compose.material3;\n\npublic final class R {\n')
@@ -444,7 +451,7 @@ echo "=== Step 8: Zipalign ==="
 $BUILD_TOOLS/zipalign -f 4 $BUILD/apk/airvia-unsigned.apk $BUILD/apk/airvia-aligned.apk
 
 echo "=== Step 9: Sign with debug key ==="
-KEYSTORE=~/workspace/jazzy/build-manual/debug.keystore
+KEYSTORE=$BUILD/debug.keystore
 if [ ! -f "$KEYSTORE" ]; then
   $JAVA_HOME/bin/keytool -genkeypair -keystore $KEYSTORE -alias androiddebugkey \
     -storepass android -keypass android -keyalg RSA -keysize 2048 -validity 10950 \

@@ -39,6 +39,19 @@ object CastEngine {
         fun stop()
     }
 
+    /** Which AirPlay stack to use for AirPlay speakers. */
+    enum class AirPlayMode(val label: String) {
+        /** AirPlay 2 first, fall back to AirPlay 1 (RAOP) on failure. */
+        AUTO("Auto"),
+        /** AirPlay 2 only — no fallback. */
+        AIRPLAY2("AirPlay 2"),
+        /** AirPlay 1 (RAOP) only — skip AirPlay 2 pairing. */
+        AIRPLAY1("AirPlay 1"),
+    }
+
+    @Volatile
+    var airplayMode: AirPlayMode = AirPlayMode.AUTO
+
     class SpeakerSession(val speaker: Speaker) {
         @Volatile
         var state: State = State.CONNECTING
@@ -361,6 +374,12 @@ object CastEngine {
 
     private fun runAirPlay(ss: SpeakerSession, source: BroadcastCapture) {
         val sp = ss.speaker
+        val mode = airplayMode
+        if (mode == AirPlayMode.AIRPLAY1) {
+            LogBus.log("[engine] AirPlay 1 (RAOP) selected for '${sp.name}'")
+            runRaop(ss, source.newConsumer())
+            return
+        }
         val consumer = source.newConsumer()
         val streamed = AtomicBoolean(false)
         val audioRef = java.util.concurrent.atomic.AtomicReference<Ap2AudioSession?>()
@@ -398,6 +417,9 @@ object CastEngine {
         if (streamed.get()) {
             LogBus.log("[engine] AP2 session to '${sp.name}' ended")
             return
+        }
+        if (mode == AirPlayMode.AIRPLAY2) {
+            throw failure ?: IllegalStateException("AirPlay 2 session ended early")
         }
         // AP2 never got audio flowing — fall back to classic RAOP.
         LogBus.log(

@@ -141,6 +141,7 @@ class CastService : Service() {
             ?: throw IllegalStateException("missing capture consent data")
         val mpm = getSystemService(MediaProjectionManager::class.java)
         val proj = mpm.getMediaProjection(resultCode, data)
+            ?: throw IllegalStateException("MediaProjection unavailable")
         // Android 14 requires a registered callback before capture.
         proj.registerCallback(object : MediaProjection.Callback() {
             override fun onStop() {
