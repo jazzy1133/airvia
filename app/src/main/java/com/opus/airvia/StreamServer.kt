@@ -128,7 +128,7 @@ class StreamServer(private val broadcast: BroadcastCapture) {
 
     /** Canonical 44-byte WAV header with streaming (max) sizes. */
     private fun wavHeader(): ByteArray {
-        val sampleRate = 44100
+        val sampleRate = broadcast.sampleRate
         val channels = 2
         val bits = 16
         val byteRate = sampleRate * channels * bits / 8

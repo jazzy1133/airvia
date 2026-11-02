@@ -1,8 +1,8 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     package="com.opus.airvia"
-    android:versionCode="9"
-    android:versionName="1.2.4">
+    android:versionCode="16"
+    android:versionName="1.3.5">
 
     <uses-sdk android:minSdkVersion="29" android:targetSdkVersion="34" />
 
@@ -14,6 +14,18 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+
+    <!-- Android 11+ package visibility (1.3.5): without this, the
+         Tune tab's per-app capture list (a MAIN/LAUNCHER
+         queryIntentActivities call) only sees a handful of system
+         apps. Declares visibility for launcher apps only —
+         deliberately NOT the QUERY_ALL_PACKAGES permission. -->
+    <queries>
+        <intent>
+            <action android:name="android.intent.action.MAIN" />
+            <category android:name="android.intent.category.LAUNCHER" />
+        </intent>
+    </queries>
 
     <application
         android:icon="@mipmap/ic_launcher"
@@ -31,6 +43,36 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+        <!-- Speaker picker sheet. Opened by the notification's
+             Speakers action (our own PendingIntent) and by a
+             LONG-PRESS on the Quick Settings tile: the system
+             launches the activity holding QS_TILE_PREFERENCES
+             (TileService API). exported=true is required for the
+             system surface; the BIND_QUICK_SETTINGS_TILE permission
+             (signature|privileged, held by SystemUI) keeps third-party
+             apps from opening it directly — same-UID callers (the
+             notification/service) pass the component check. -->
+        <activity
+            android:name=".PickerActivity"
+            android:exported="true"
+            android:excludeFromRecents="true"
+            android:launchMode="singleTop"
+            android:permission="android.permission.BIND_QUICK_SETTINGS_TILE"
+            android:theme="@android:style/Theme.Translucent.NoTitleBar">
+            <intent-filter>
+                <action android:name="android.service.quicksettings.action.QS_TILE_PREFERENCES" />
+            </intent-filter>
+        </activity>
+        <receiver
+            android:name=".AutomationReceiver"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="com.opus.airvia.action.CAST_SPEAKER" />
+                <action android:name="com.opus.airvia.action.STOP_CAST" />
+                <action android:name="com.opus.airvia.action.SET_VOLUME" />
+                <action android:name="com.opus.airvia.action.STEP_VOLUME" />
+            </intent-filter>
+        </receiver>
         <service
             android:name=".CastService"
             android:exported="false"

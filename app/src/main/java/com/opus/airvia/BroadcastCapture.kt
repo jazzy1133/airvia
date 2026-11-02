@@ -11,13 +11,18 @@ import com.opus.airvia.ap2.Ap2AudioSession
  * the ring holds behind snaps forward to the oldest retained frame —
  * live audio prefers "now" over a growing delay.
  */
-class BroadcastCapture : AudibleSource {
+class BroadcastCapture(
+    /** Hub sample rate: 44100 normally, 48000 in hi-res mode (1.3.0). */
+    val sampleRate: Int = 44100,
+) : AudibleSource {
     companion object {
         const val CHUNK_FRAMES = 352
-        private const val CAPACITY_FRAMES = 44100 * 8 // ~8 s of stereo audio
     }
 
-    private val ring = ShortArray(CAPACITY_FRAMES * 2)
+    /** ~8 s of stereo audio at the hub rate. */
+    val capacityFrames: Int = sampleRate * 8
+
+    private val ring = ShortArray(capacityFrames * 2)
     private val lock = Object()
 
     /** Absolute frame index of the next frame to be written. */
@@ -45,8 +50,8 @@ class BroadcastCapture : AudibleSource {
             var src = 0
             while (src < samples.size) {
                 val frameIdx = writePos
-                val ringOff = ((frameIdx % CAPACITY_FRAMES) * 2).toInt()
-                val framesToEnd = CAPACITY_FRAMES - (frameIdx % CAPACITY_FRAMES).toInt()
+                val ringOff = ((frameIdx % capacityFrames) * 2).toInt()
+                val framesToEnd = capacityFrames - (frameIdx % capacityFrames).toInt()
                 val framesAvail = (samples.size - src) / 2
                 val n = minOf(framesToEnd, framesAvail)
                 System.arraycopy(samples, src, ring, ringOff, n * 2)
@@ -62,7 +67,43 @@ class BroadcastCapture : AudibleSource {
         synchronized(lock) { lock.notifyAll() }
     }
 
-    fun newConsumer(): Consumer = Consumer()
+    private val liveConsumers =
+        java.util.concurrent.CopyOnWriteArrayList<Consumer>()
+
+    fun newConsumer(): Consumer {
+        val c = Consumer()
+        liveConsumers.add(c)
+        return c
+    }
+
+    /**
+     * A consumer aligned to the sync group (1.3.0): starts at the
+     * earliest cursor among currently-active consumers instead of the
+     * live edge, so a speaker joining a group already playing starts
+     * on the group's timeline, not "now". Falls back to the live edge
+     * when no group is active.
+     */
+    fun newAlignedConsumer(): Consumer {
+        val c = newConsumer()
+        groupCursor()?.let { c.seekTo(it) }
+        return c
+    }
+
+    /** Earliest read position among live (not released/finished)
+     *  consumers, or null when none qualify. */
+    fun groupCursor(): Long? {
+        var best: Long? = null
+        for (c in liveConsumers) {
+            if (c.released || c.finished) continue
+            val cur = c.cursorPosition
+            if (best == null || cur < best) best = cur
+        }
+        return best
+    }
+
+    internal fun unregister(c: Consumer) {
+        liveConsumers.remove(c)
+    }
 
     inner class Consumer : Ap2AudioSession.PcmSource {
         /**
@@ -75,9 +116,30 @@ class BroadcastCapture : AudibleSource {
         override val finished: Boolean
             get() = this@BroadcastCapture.finished && cursor >= writePos
 
+        @Volatile
+        var released: Boolean = false
+            private set
+
+        /** Absolute frame index this consumer reads next. */
+        val cursorPosition: Long
+            get() = synchronized(lock) { cursor }
+
+        /** Stop tracking this consumer for group alignment. */
+        fun release() {
+            released = true
+            unregister(this)
+        }
+
+        /** Move the read cursor (group alignment at join time). */
+        fun seekTo(frame: Long) {
+            synchronized(lock) {
+                cursor = maxOf(frame, writePos - capacityFrames)
+            }
+        }
+
         /** Snap forward if the ring has overwritten what we still needed. */
         private fun snapLocked() {
-            val oldest = writePos - CAPACITY_FRAMES
+            val oldest = writePos - capacityFrames
             if (cursor < oldest) cursor = oldest
         }
 
@@ -126,8 +188,8 @@ class BroadcastCapture : AudibleSource {
             val totalFrames = dest.size / 2
             while (copiedFrames < totalFrames) {
                 val idx = fromFrame + copiedFrames
-                val ringFrame = (idx % CAPACITY_FRAMES).toInt()
-                val n = minOf(CAPACITY_FRAMES - ringFrame, totalFrames - copiedFrames)
+                val ringFrame = (idx % capacityFrames).toInt()
+                val n = minOf(capacityFrames - ringFrame, totalFrames - copiedFrames)
                 System.arraycopy(ring, ringFrame * 2, dest, copiedFrames * 2, n * 2)
                 copiedFrames += n
             }

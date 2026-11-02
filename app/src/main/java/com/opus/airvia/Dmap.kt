@@ -41,4 +41,17 @@ object Dmap {
         field(out, "asal", album)
         return out.toByteArray()
     }
+
+    /**
+     * Placeholder track info sent when the source app provides no
+     * now-playing metadata at all: some receivers (macOS especially —
+     * issue #4) never open their player UI for a metadata-less session,
+     * so the speaker shows "Airvia" with the app logo instead of
+     * nothing. Real metadata always wins; this is only a fallback.
+     */
+    const val PLACEHOLDER_TITLE = "Airvia"
+    const val PLACEHOLDER_ARTIST = "Airvia"
+
+    fun placeholderBody(): ByteArray =
+        metadataBody(PLACEHOLDER_TITLE, PLACEHOLDER_ARTIST, "")
 }

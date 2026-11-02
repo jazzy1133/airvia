@@ -6,7 +6,9 @@ import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -28,6 +30,8 @@ import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
@@ -39,6 +43,9 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -55,6 +62,7 @@ fun CastScreen(
     sessionStates: Map<String, CastEngine.State>,
     sessionVolumes: Map<String, Int>,
     sessionProtocols: Map<String, String>,
+    mutedSpeakers: Map<String, Boolean> = emptyMap(),
     speakers: List<Speaker>,
     scanning: Boolean,
     hostInput: String,
@@ -62,10 +70,17 @@ fun CastScreen(
     onHostChange: (String) -> Unit,
     onPortChange: (String) -> Unit,
     onCast: (Speaker) -> Unit,
+    onPairWithPin: (Speaker) -> Unit,
+    protocolPrefs: Map<String, ProtocolPref> = emptyMap(),
+    pairings: Map<String, Boolean> = emptyMap(),
+    onProtocolPref: (Speaker, ProtocolPref) -> Unit = { _, _ -> },
+    onSpeakerOptions: (Speaker) -> Unit = {},
+    onDoctor: (Speaker) -> Unit = {},
     onStopSpeaker: (Speaker) -> Unit,
     onStopAll: () -> Unit,
     onRescan: () -> Unit,
     onVolumeSpeaker: (Speaker, Int) -> Unit,
+    onMuteSpeaker: (Speaker) -> Unit = {},
     sleepMinutes: Int,
     onSleepTimer: (Int) -> Unit,
     lastSpeaker: Speaker?,
@@ -75,6 +90,7 @@ fun CastScreen(
             .fillMaxSize()
             .padding(horizontal = 16.dp),
         verticalArrangement = Arrangement.spacedBy(16.dp),
+        contentPadding = PaddingValues(bottom = 96.dp),
     ) {
         item { Spacer(Modifier.height(4.dp)) }
 
@@ -105,6 +121,7 @@ fun CastScreen(
                     "Speakers",
                     style = MaterialTheme.typography.titleLarge,
                     fontWeight = FontWeight.SemiBold,
+                    color = MaterialTheme.colorScheme.onSurface,
                     modifier = Modifier.weight(1f),
                 )
                 if (scanning) {
@@ -130,8 +147,16 @@ fun CastScreen(
                     volumePct = sessionVolumes[sp.key] ?: 100,
                     protocol = sessionProtocols[sp.key],
                     onCast = { onCast(sp) },
+                    onPairWithPin = { onPairWithPin(sp) },
+                    protocolPref = protocolPrefs[sp.key] ?: ProtocolPref.AUTO,
+                    hasPairing = pairings[sp.key] ?: false,
+                    onProtocolPref = { onProtocolPref(sp, it) },
+                    onSpeakerOptions = { onSpeakerOptions(sp) },
+                    onDoctor = { onDoctor(sp) },
                     onStop = { onStopSpeaker(sp) },
                     onVolume = { onVolumeSpeaker(sp, it) },
+                    muted = mutedSpeakers[sp.key] ?: false,
+                    onMute = { onMuteSpeaker(sp) },
                 )
             }
         }
@@ -312,6 +337,7 @@ private fun EqualizerBars() {
     }
 }
 
+@OptIn(androidx.compose.foundation.ExperimentalFoundationApi::class)
 @Composable
 private fun SpeakerCard(
     speaker: Speaker,
@@ -320,12 +346,30 @@ private fun SpeakerCard(
     volumePct: Int,
     protocol: String?,
     onCast: () -> Unit,
+    onPairWithPin: () -> Unit,
+    protocolPref: ProtocolPref = ProtocolPref.AUTO,
+    hasPairing: Boolean = false,
+    onProtocolPref: (ProtocolPref) -> Unit = {},
+    onSpeakerOptions: () -> Unit = {},
+    onDoctor: () -> Unit = {},
     onStop: () -> Unit,
     onVolume: (Int) -> Unit,
+    muted: Boolean = false,
+    onMute: () -> Unit = {},
 ) {
+    var menuOpen by remember { mutableStateOf(false) }
+    Box(modifier = Modifier.fillMaxWidth()) {
     Card(
-        onClick = { if (!active) onCast() },
-        modifier = Modifier.fillMaxWidth(),
+        modifier = Modifier
+            .fillMaxWidth()
+            .combinedClickable(
+                onClick = { if (!active) onCast() },
+                // Long-press opens the speaker menu: PIN pairing (the
+                // way in on receivers that demand a code, and on ones
+                // that connect silently but never play — Mac), the
+                // connection protocol, sound options, Speaker Doctor.
+                onLongClick = { menuOpen = true },
+            ),
         shape = RoundedCornerShape(20.dp),
         colors = CardDefaults.cardColors(
             containerColor = if (active) {
@@ -364,10 +408,26 @@ private fun SpeakerCard(
                             SpeakerKind.AIRPLAY -> "${speaker.host}:${speaker.port}"
                             SpeakerKind.DLNA -> "DLNA / Sonos"
                             SpeakerKind.CHROMECAST -> "Chromecast"
-                        } + if (active && !protocol.isNullOrEmpty()) " · $protocol" else "",
+                        } + when {
+                            // While active this is the protocol the
+                            // live session actually streams with.
+                            active && !protocol.isNullOrEmpty() -> " · $protocol"
+                            // Idle honesty (1.3.1): a saved PIN pairing
+                            // exists for this receiver.
+                            !active && speaker.kind == SpeakerKind.AIRPLAY &&
+                                hasPairing -> " · Paired"
+                            else -> ""
+                        },
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
+                    if (!active) {
+                        Text(
+                            "Long-press for pairing, connection & sound options",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
                 }
                 when {
                     connecting -> CircularProgressIndicator(
@@ -388,11 +448,36 @@ private fun SpeakerCard(
                 Spacer(Modifier.height(8.dp))
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     VolumeDownIcon()
+                    // Local drag state (1.3.1): while the finger is
+                    // down the slider renders the FINGER's value, not
+                    // the engine-polled one — binding straight to the
+                    // polled value made the thumb fight the drag in
+                    // polling steps ("sluggish/intermittent"). Moves
+                    // still forward to the engine immediately (it and
+                    // the sessions coalesce sends); the finish commits
+                    // the final value, then external changes (keys,
+                    // notification) own the thumb again. Horizontal
+                    // padding keeps the whole thumb inside the gesture
+                    // bounds at 0 %/100 % so the ends are grabbable,
+                    // and the 48 dp strip is a human-sized touch area.
+                    var dragVolume by remember(speaker.key) {
+                        mutableStateOf<Float?>(null)
+                    }
                     Slider(
-                        value = volumePct.toFloat(),
-                        onValueChange = { onVolume(it.toInt()) },
+                        value = dragVolume ?: volumePct.toFloat(),
+                        onValueChange = { v ->
+                            dragVolume = v
+                            onVolume(v.toInt())
+                        },
+                        onValueChangeFinished = {
+                            dragVolume?.let { onVolume(it.toInt()) }
+                            dragVolume = null
+                        },
                         valueRange = 0f..100f,
-                        modifier = Modifier.weight(1f),
+                        modifier = Modifier
+                            .weight(1f)
+                            .height(48.dp)
+                            .padding(horizontal = 10.dp),
                     )
                     VolumeUpIcon()
                     Spacer(Modifier.width(8.dp))
@@ -401,9 +486,102 @@ private fun SpeakerCard(
                         style = MaterialTheme.typography.labelLarge,
                         modifier = Modifier.width(44.dp),
                     )
+                    // One-tap mute (1.3.2): silences this speaker
+                    // only; the track keeps playing. The % readout
+                    // already shows the sent level (0% while muted).
+                    TextButton(onClick = onMute) {
+                        Text(if (muted) "Unmute" else "Mute")
+                    }
                 }
             }
         }
+    }
+    DropdownMenu(
+        expanded = menuOpen,
+        onDismissRequest = { menuOpen = false },
+    ) {
+        if (speaker.kind == SpeakerKind.AIRPLAY) {
+            DropdownMenuItem(
+                text = {
+                    Text(
+                        if (hasPairing) "Pair with PIN ✓ (saved)" else "Pair with PIN",
+                    )
+                },
+                onClick = {
+                    menuOpen = false
+                    onPairWithPin()
+                },
+            )
+            DropdownMenuItem(
+                text = {
+                    Text(
+                        "Connection: " + when (protocolPref) {
+                            ProtocolPref.AUTO -> "Auto"
+                            ProtocolPref.AP2 -> "AirPlay 2 first"
+                            ProtocolPref.RAOP -> "AirPlay 1 first"
+                        },
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                },
+                onClick = {},
+                enabled = false,
+            )
+            for (pref in ProtocolPref.values()) {
+                DropdownMenuItem(
+                    text = {
+                        Text(
+                            (if (pref == protocolPref) "✓ " else "    ") +
+                                when (pref) {
+                                    ProtocolPref.AUTO -> "Auto (recommended)"
+                                    ProtocolPref.AP2 -> "AirPlay 2 first"
+                                    ProtocolPref.RAOP -> "AirPlay 1 first"
+                                },
+                        )
+                    },
+                    onClick = {
+                        menuOpen = false
+                        onProtocolPref(pref)
+                    },
+                )
+            }
+            if (hasPairing) {
+                // Pairing precedence, stated where the choice is made
+                // (1.3.1): Auto verifies first; an explicit choice
+                // wins, with the pairing as the AirPlay 2 fallback.
+                DropdownMenuItem(
+                    text = {
+                        Text(
+                            if (protocolPref == ProtocolPref.AUTO) {
+                                "PIN pairing saved — Auto uses AirPlay 2 (verified) first"
+                            } else {
+                                "Your choice connects first; the saved pairing is the AirPlay 2 fallback"
+                            },
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    },
+                    onClick = {},
+                    enabled = false,
+                )
+            }
+        }
+        DropdownMenuItem(
+            text = { Text("Speaker options (EQ, delay, max volume)") },
+            onClick = {
+                menuOpen = false
+                onSpeakerOptions()
+            },
+        )
+        if (speaker.kind == SpeakerKind.AIRPLAY) {
+            DropdownMenuItem(
+                text = { Text("Speaker Doctor") },
+                onClick = {
+                    menuOpen = false
+                    onDoctor()
+                },
+            )
+        }
+    }
     }
 }
 

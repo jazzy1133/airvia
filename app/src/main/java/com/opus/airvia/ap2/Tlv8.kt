@@ -19,6 +19,8 @@ object Tlv8 {
     const val ENCRYPTED_DATA = 0x05
     const val STATE = 0x06
     const val ERROR = 0x07
+    const val SIGNATURE = 0x0A
+    const val NAME = 0x11
     const val FLAGS = 0x13 // HAP pair-setup Flags TLV type (Apple: 0x13)
     const val SEPARATOR = 0xFF
 

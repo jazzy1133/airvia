@@ -32,13 +32,15 @@ interface AudibleSource {
 class CaptureSource(
     private val projection: MediaProjection,
     private val matchUids: List<Int> = emptyList(),
+    /** Rate handed to [onSamples]: 44100 (default) or 48000 hi-res. */
+    private val outputRate: Int = DST_RATE,
 ) {
     companion object {
         const val SRC_RATE = 48000
         const val DST_RATE = 44100
     }
 
-    /** Receives resampled, EQ'd interleaved 44.1 kHz chunks. */
+    /** Receives resampled (unless hi-res), EQ'd interleaved chunks. */
     @Volatile
     var onSamples: ((ShortArray) -> Unit)? = null
 
@@ -48,7 +50,8 @@ class CaptureSource(
 
     private var record: AudioRecord? = null
     private var reader: Thread? = null
-    private val resampler = StreamResampler(SRC_RATE, DST_RATE)
+    private val resampler: StreamResampler? =
+        if (outputRate == SRC_RATE) null else StreamResampler(SRC_RATE, outputRate)
 
     fun start() {
         val builder = AudioPlaybackCaptureConfiguration.Builder(projection)
@@ -80,7 +83,7 @@ class CaptureSource(
         rec.startRecording()
         reader = thread(name = "airvia-capture") { readLoop(rec) }
         LogBus.log(
-            "[capture] device audio capture live: ${SRC_RATE}Hz -> ${DST_RATE}Hz" +
+            "[capture] device audio capture live: ${SRC_RATE}Hz -> ${outputRate}Hz" +
                 if (matchUids.isNotEmpty()) " (selected apps only)" else "",
         )
     }
@@ -98,7 +101,7 @@ class CaptureSource(
                 break
             }
             if (n == 0) continue
-            val out = resampler.push(buf.copyOf(n))
+            val out = resampler?.push(buf.copyOf(n)) ?: buf.copyOf(n)
             if (out.isNotEmpty()) {
                 Eq.processor.process(out)
                 onSamples?.invoke(out)

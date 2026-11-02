@@ -74,9 +74,11 @@ object SrpClient {
     /** k = SHA512(N_pad || g_pad), the SRP-6a multiplier. */
     fun k(): BigInteger = bi(sha512(pad(N), pad(G)))
 
-    /** x = SHA512(salt || SHA512("Pair-Setup:3939")). */
-    fun x(salt: ByteArray): BigInteger =
-        bi(sha512(salt, sha512("$IDENTITY:$PIN".toByteArray(Charsets.UTF_8))))
+    /** x = SHA512(salt || SHA512("Pair-Setup:<password>")). The transient
+     *  flow uses the default [PIN]; persistent PIN pairing passes the
+     *  user-entered code. */
+    fun x(salt: ByteArray, password: String = PIN): BigInteger =
+        bi(sha512(salt, sha512("$IDENTITY:$password".toByteArray(Charsets.UTF_8))))
 
     data class Ephemeral(val a: BigInteger, val aPub: ByteArray)
 
@@ -99,12 +101,17 @@ object SrpClient {
      * ephemeral [a]. Returns the session key K (64B), our M1 proof (64B)
      * and A (384B) for the M3 body and later server-proof verification.
      */
-    fun compute(salt: ByteArray, bBytes: ByteArray, a: BigInteger): SessionKeys {
+    fun compute(
+        salt: ByteArray,
+        bBytes: ByteArray,
+        a: BigInteger,
+        password: String = PIN,
+    ): SessionKeys {
         val aPub = pad(G.modPow(a, N))
         val b = bi(bBytes)
         require(b.mod(N) != BigInteger.ZERO) { "B mod N == 0 (invalid server key)" }
         val kk = k()
-        val xx = x(salt)
+        val xx = x(salt, password)
         val u = bi(sha512(aPub, pad(b)))
         val base = (b - kk * G.modPow(xx, N)).mod(N)
         val s = base.modPow(a + u * xx, N)

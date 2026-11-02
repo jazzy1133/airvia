@@ -1,0 +1,73 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Expanded-notification speaker controls (1.3.0): per-speaker
+     volume -/+ and stop, wired by CastService via RemoteViews.
+     Ids are resolved by name at runtime (this build pipeline
+     generates R after the Kotlin step). -->
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
+    android:orientation="vertical"
+    android:padding="12dp">
+
+    <TextView
+        android:id="@+id/notif_title"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:text="Airvia — speakers"
+        android:textStyle="bold"
+        android:textSize="14sp" />
+
+    <LinearLayout
+        android:id="@+id/notif_row1"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="horizontal"
+        android:gravity="center_vertical"
+        android:paddingTop="6dp">
+        <TextView android:id="@+id/notif_name1" android:layout_width="0dp" android:layout_height="wrap_content" android:layout_weight="1" android:ellipsize="end" android:maxLines="1" />
+        <TextView android:id="@+id/notif_down1" android:layout_width="40dp" android:layout_height="40dp" android:gravity="center" android:text="−" android:textSize="18sp" />
+        <TextView android:id="@+id/notif_pct1" android:layout_width="44dp" android:layout_height="wrap_content" android:gravity="center" />
+        <TextView android:id="@+id/notif_up1" android:layout_width="40dp" android:layout_height="40dp" android:gravity="center" android:text="+" android:textSize="18sp" />
+        <TextView android:id="@+id/notif_mute1" android:layout_width="52dp" android:layout_height="40dp" android:gravity="center" android:text="Mute" />
+        <TextView android:id="@+id/notif_stop1" android:layout_width="52dp" android:layout_height="40dp" android:gravity="center" android:text="Stop" />
+    </LinearLayout>
+
+    <LinearLayout
+        android:id="@+id/notif_row2"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="horizontal"
+        android:gravity="center_vertical"
+        android:paddingTop="6dp"
+        android:visibility="gone">
+        <TextView android:id="@+id/notif_name2" android:layout_width="0dp" android:layout_height="wrap_content" android:layout_weight="1" android:ellipsize="end" android:maxLines="1" />
+        <TextView android:id="@+id/notif_down2" android:layout_width="40dp" android:layout_height="40dp" android:gravity="center" android:text="−" android:textSize="18sp" />
+        <TextView android:id="@+id/notif_pct2" android:layout_width="44dp" android:layout_height="wrap_content" android:gravity="center" />
+        <TextView android:id="@+id/notif_up2" android:layout_width="40dp" android:layout_height="40dp" android:gravity="center" android:text="+" android:textSize="18sp" />
+        <TextView android:id="@+id/notif_mute2" android:layout_width="52dp" android:layout_height="40dp" android:gravity="center" android:text="Mute" />
+        <TextView android:id="@+id/notif_stop2" android:layout_width="52dp" android:layout_height="40dp" android:gravity="center" android:text="Stop" />
+    </LinearLayout>
+
+    <LinearLayout
+        android:id="@+id/notif_row3"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="horizontal"
+        android:gravity="center_vertical"
+        android:paddingTop="6dp"
+        android:visibility="gone">
+        <TextView android:id="@+id/notif_name3" android:layout_width="0dp" android:layout_height="wrap_content" android:layout_weight="1" android:ellipsize="end" android:maxLines="1" />
+        <TextView android:id="@+id/notif_down3" android:layout_width="40dp" android:layout_height="40dp" android:gravity="center" android:text="−" android:textSize="18sp" />
+        <TextView android:id="@+id/notif_pct3" android:layout_width="44dp" android:layout_height="wrap_content" android:gravity="center" />
+        <TextView android:id="@+id/notif_up3" android:layout_width="40dp" android:layout_height="40dp" android:gravity="center" android:text="+" android:textSize="18sp" />
+        <TextView android:id="@+id/notif_mute3" android:layout_width="52dp" android:layout_height="40dp" android:gravity="center" android:text="Mute" />
+        <TextView android:id="@+id/notif_stop3" android:layout_width="52dp" android:layout_height="40dp" android:gravity="center" android:text="Stop" />
+    </LinearLayout>
+
+    <TextView
+        android:id="@+id/notif_more"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:paddingTop="4dp"
+        android:visibility="gone" />
+</LinearLayout>

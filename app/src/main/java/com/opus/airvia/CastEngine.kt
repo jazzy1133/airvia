@@ -32,6 +32,13 @@ object CastEngine {
 
     private const val SILENCE_STOP_MS = 300_000L
 
+    /** First-connect volume (issue #6): a speaker with no remembered
+     *  volume starts here instead of 100, so a new speaker — or one
+     *  whose remembered volume was lost — can never blast at full
+     *  volume. 15% = -25.5 dB by pctToDb: clearly audible on a
+     *  HomePod, safe on a full-gain amplifier. */
+    private const val FIRST_CONNECT_VOLUME_PCT = 15
+
     /** A running sender session for one speaker. */
     interface LiveSession {
         fun setVolumePct(pct: Int)
@@ -46,6 +53,15 @@ object CastEngine {
         @Volatile
         var volumePct: Int = 100
 
+        /** One-tap mute (1.3.2): true while this speaker is silenced
+         *  with its track still playing; [preMuteLevel] is the level
+         *  unmute restores. */
+        @Volatile
+        var muted: Boolean = false
+
+        @Volatile
+        var preMuteLevel: Int = 100
+
         @Volatile
         var error: String? = null
 
@@ -58,6 +74,14 @@ object CastEngine {
 
         @Volatile
         var stopRequested: Boolean = false
+
+        /** The profiled PCM chain feeding this session (AirPlay). */
+        @Volatile
+        var fx: ProfiledConsumer? = null
+
+        /** True once audio actually streamed in this session. */
+        @Volatile
+        var streamedOnce: Boolean = false
     }
 
     private val sessions = LinkedHashMap<String, SpeakerSession>()
@@ -79,6 +103,14 @@ object CastEngine {
     @Volatile
     var volumeLoader: ((Speaker) -> Int?)? = null
 
+    /** Set by the service: persists per-speaker mute state (1.3.2). */
+    @Volatile
+    var muteSaver: ((Speaker, MuteState) -> Unit)? = null
+
+    /** Set by the service: loads a speaker's persisted mute state. */
+    @Volatile
+    var muteLoader: ((Speaker) -> MuteState?)? = null
+
     /** Set by the service: URL of the local HTTP audio stream. */
     @Volatile
     var streamUrlProvider: (() -> String)? = null
@@ -90,6 +122,85 @@ object CastEngine {
      */
     @Volatile
     var chromecastStarter: ((Speaker, String) -> LiveSession?)? = null
+
+    // --- HAP persistent pairing (PIN pairing) plumbing ------------------
+    // All set by the service from Prefs; the engine stays Android-free.
+
+    /** Our long-term HAP controller identity (seed + identifier). */
+    @Volatile
+    var identityProvider: (() -> com.opus.airvia.ap2.HapPairing.ControllerIdentity)? = null
+
+    /** Stored PIN pairing for a speaker, or null when never paired. */
+    @Volatile
+    var credentialsLoader: ((Speaker) -> com.opus.airvia.ap2.HapPairing.PairCredentials?)? = null
+
+    /** Persist a fresh pairing after a successful PIN pair-setup. */
+    @Volatile
+    var credentialsSaver: ((Speaker, com.opus.airvia.ap2.HapPairing.PairCredentials) -> Unit)? = null
+
+    /**
+     * Ask the user for the code shown on the speaker's screen; blocks
+     * the cast thread, returns null on cancel/timeout.
+     */
+    @Volatile
+    var pinProvider: ((Speaker) -> String?)? = null
+
+    /** Placeholder track info for metadata-less sessions (null = off). */
+    @Volatile
+    var placeholderProvider: (() -> PlaceholderTrack?)? = null
+
+    /**
+     * Placeholder refusal memory (1.3.1): whether this speaker's
+     * receiver refused the placeholder before (400) — when true the
+     * placeholder is not offered again. Set by the service from Prefs.
+     */
+    @Volatile
+    var placeholderRefusedLoader: ((Speaker) -> Boolean)? = null
+
+    /** Persist a fresh placeholder refusal for a speaker (1.3.1). */
+    @Volatile
+    var placeholderRefusedSaver: ((Speaker) -> Unit)? = null
+
+    /** Set by the service: loads a speaker's sound profile (1.3.0). */
+    @Volatile
+    var profileLoader: ((Speaker) -> SpeakerProfile)? = null
+
+    /** Set by the service: per-speaker protocol preference (1.3.0). */
+    @Volatile
+    var protocolPrefLoader: ((Speaker) -> ProtocolPref)? = null
+
+    /** Set by the service: learned-protocol persistence (1.3.0). */
+    @Volatile
+    var learnedLoader: ((Speaker) -> AirProtocol?)? = null
+
+    @Volatile
+    var learnedSaver: ((Speaker, AirProtocol) -> Unit)? = null
+
+    /** Set by the service: auto-reconnect master switch (1.3.0). */
+    @Volatile
+    var reconnectEnabled: (() -> Boolean)? = null
+
+    /** Placeholder now-playing info: title/artist + PNG artwork bytes. */
+    class PlaceholderTrack(
+        val title: String,
+        val artist: String,
+        val artworkPng: ByteArray?,
+    )
+
+    /** Speakers whose next connect must go straight to PIN pairing. */
+    private val forcePinKeys = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
+
+    /** Mark [sp] so its next connect runs the PIN pairing flow first. */
+    fun requestForcePin(sp: Speaker) {
+        forcePinKeys.add(sp.key)
+    }
+
+    /**
+     * The PIN flow was entered (receiver demanded it, or the user asked
+     * for it) and did not complete — abort the connect instead of the
+     * RAOP fallback, which cannot succeed on a PIN-only receiver.
+     */
+    class PinFlowAborted(reason: String) : Exception(reason)
 
     private val ioExecutor = Executors.newCachedThreadPool { r ->
         Thread(r, "airvia-engine-io").apply { isDaemon = true }
@@ -202,6 +313,7 @@ object CastEngine {
             } catch (_: InterruptedException) {
                 return
             }
+            processReconnects()
             if (snapshot().isEmpty()) continue
             val dl = sleepDeadlineMs
             if (dl > 0 && System.currentTimeMillis() >= dl) {
@@ -236,11 +348,33 @@ object CastEngine {
             sessions[sp.key] = ss
         }
         lastError = null
-        ss.volumePct = try {
-            volumeLoader?.invoke(sp)
+        // First connect to a speaker with no remembered volume: start
+        // safe (issue #6) — never blast a new speaker at 100%. Known
+        // speakers keep their stored level (including 100 and
+        // 0-for-muted). The default is computed, not stored, so a
+        // speaker connected at 15% and never touched gets 15% again
+        // next time. Coerced to the profile cap, which the initial
+        // assignment otherwise bypasses (applyVolume is the only
+        // other place the cap is applied).
+        val profileCap = try {
+            profileLoader?.invoke(sp)?.maxVolumePct
         } catch (_: Exception) {
             null
         } ?: 100
+        ss.volumePct = (try {
+            volumeLoader?.invoke(sp)
+        } catch (_: Exception) {
+            null
+        } ?: FIRST_CONNECT_VOLUME_PCT).coerceAtMost(profileCap)
+        // Mute restore (1.3.2): a persisted mute survives a restart
+        // (saved level reads 0 while muted, which is consistent).
+        try {
+            muteLoader?.invoke(sp)?.let { m ->
+                ss.muted = m.muted
+                ss.preMuteLevel = m.preMuteLevel
+            }
+        } catch (_: Exception) {
+        }
         LogBus.log("[engine] connecting to '${sp.name}' (${sp.kind})")
         notifyChanged()
         thread(name = "airvia-cast-${sp.key}", isDaemon = true) {
@@ -277,11 +411,17 @@ object CastEngine {
                 sessions.remove(sp.key) === ss
             }
             if (removed) notifyChanged()
+            try {
+                ss.fx?.releaseDelegate()
+            } catch (_: Exception) {
+            }
+            scheduleReconnect(ss)
         }
     }
 
     /** Stop one speaker's session (no-op when not casting to it). */
     fun stopSpeaker(sp: Speaker) {
+        reconnects.remove(sp.key)
         val ss = synchronized(sessionsLock) { sessions[sp.key] } ?: return
         ss.stopRequested = true
         try {
@@ -294,6 +434,7 @@ object CastEngine {
 
     /** Stop every session. */
     fun stopAll() {
+        reconnects.clear()
         sleepMinutes = 0
         sleepDeadlineMs = 0
         val all = snapshot()
@@ -319,10 +460,38 @@ object CastEngine {
 
     // --- volume -----------------------------------------------------------
 
-    /** Set one speaker's volume, 0..100, and remember it. */
+    /** Set one speaker's volume, 0..100, and remember it. The
+     *  per-speaker profile's volume guard caps the level at send time
+     *  (the stored value is untouched, so lifting the cap restores
+     *  it) — this is the single choke point every volume path uses.
+     *
+     *  Mute rule (1.3.2): an explicit set to a non-zero level while
+     *  muted UNMUTES to the new value (the standard expectation —
+     *  dragging a slider on a muted speaker unmutes it). Setting 0
+     *  while muted keeps the mute. Mute's own send bypasses this
+     *  through [applyVolume] so it never trips its own unmute. */
     fun setVolume(sp: Speaker, pct: Int) {
         val ss = sessionFor(sp) ?: return
         val v = pct.coerceIn(0, 100)
+        if (ss.muted && v != 0) {
+            ss.muted = false
+            try {
+                muteSaver?.invoke(sp, MuteState(false, ss.preMuteLevel))
+            } catch (_: Exception) {
+            }
+        }
+        applyVolume(ss, v)
+    }
+
+    /** The choke-point body: cap, store, send. No mute semantics. */
+    private fun applyVolume(ss: SpeakerSession, pct: Int) {
+        val sp = ss.speaker
+        val cap = try {
+            profileLoader?.invoke(sp)?.maxVolumePct
+        } catch (_: Exception) {
+            null
+        } ?: 100
+        val v = pct.coerceIn(0, 100).coerceAtMost(cap)
         ss.volumePct = v
         try {
             volumeSaver?.invoke(sp, v)
@@ -334,6 +503,42 @@ object CastEngine {
         }
         if (ss === snapshot().firstOrNull()) VolumeKeys.updateVolume(v)
     }
+
+    /**
+     * One-tap per-speaker mute (1.3.2, issue #5): silences ONLY this
+     * speaker while its track keeps playing; unmute restores exactly
+     * the level it had (guard-capped at the choke point). Muting an
+     * already-muted speaker is a no-op — the original pre-mute level
+     * is kept, never overwritten by the 0 it sits at. Mute persists
+     * per speaker (see [muteSaver]) so a restart mid-mute does not
+     * blast audio; stopping a speaker does not clear it.
+     */
+    fun setMuted(sp: Speaker, muted: Boolean) {
+        val ss = sessionFor(sp) ?: return
+        if (muted) {
+            if (ss.muted) return
+            ss.preMuteLevel = ss.volumePct
+            ss.muted = true
+            try {
+                muteSaver?.invoke(sp, MuteState(true, ss.preMuteLevel))
+            } catch (_: Exception) {
+            }
+            applyVolume(ss, 0)
+        } else {
+            if (!ss.muted) return
+            val restore = ss.preMuteLevel
+            ss.muted = false
+            try {
+                muteSaver?.invoke(sp, MuteState(false, restore))
+            } catch (_: Exception) {
+            }
+            applyVolume(ss, restore)
+        }
+        notifyChanged()
+    }
+
+    /** Live muted flag for one speaker (false when not casting). */
+    fun isMuted(sp: Speaker): Boolean = sessionFor(sp)?.muted ?: false
 
     /** Legacy single-speaker setter: drives the primary session. */
     fun setVolume(pct: Int) {
@@ -354,35 +559,298 @@ object CastEngine {
         for (ss in snapshot()) setVolume(ss.speaker, ss.volumePct + delta)
     }
 
+    /**
+     * Push a (possibly edited) profile into a live session: the delay
+     * line adjusts immediately; a lowered volume cap re-clamps the
+     * current level. EQ changes apply from the next session (the
+     * filter chain is built at connect time).
+     */
+    fun applyProfile(sp: Speaker, profile: SpeakerProfile) {
+        val ss = sessionFor(sp) ?: return
+        ss.fx?.setDelayMs(profile.delayMs)
+        if (ss.volumePct > profile.maxVolumePct) {
+            setVolume(sp, ss.volumePct)
+        }
+    }
+
     private fun pctToDb(pct: Int): Float =
         (-30.0 + (pct.coerceIn(0, 100) / 100.0) * 30.0).toFloat()
 
+    // --- auto-reconnect (1.3.0) -------------------------------------------
+
+    private class ReconnectEntry(
+        val speaker: Speaker,
+        var attempts: Int,
+        var nextMs: Long,
+    )
+
+    private val reconnects =
+        java.util.concurrent.ConcurrentHashMap<String, ReconnectEntry>()
+
+    private val reconnectDelaysMs = longArrayOf(5_000L, 15_000L, 60_000L)
+
+    /**
+     * A session that actually streamed and then ended WITHOUT the user
+     * stopping it (network drop, receiver teardown, control-channel
+     * failure) is retried with backoff while the capture pipeline is
+     * alive — max one retry per delay step (5 s, 15 s, 60 s), then we
+     * give up until the user acts. User stops never land here
+     * (stopRequested), and a successful re-stream clears the entry.
+     */
+    private fun scheduleReconnect(ss: SpeakerSession) {
+        if (ss.stopRequested || !ss.streamedOnce) return
+        val enabled = try {
+            reconnectEnabled?.invoke()
+        } catch (_: Exception) {
+            null
+        } ?: true
+        if (!enabled) return
+        val key = ss.speaker.key
+        val entry = reconnects.getOrPut(key) {
+            ReconnectEntry(ss.speaker, 0, 0L)
+        }
+        if (entry.attempts >= reconnectDelaysMs.size) {
+            reconnects.remove(key)
+            LogBus.log(
+                "[engine] '${ss.speaker.name}' dropped again — " +
+                    "giving up auto-reconnect",
+            )
+            return
+        }
+        val delay = reconnectDelaysMs[entry.attempts]
+        entry.attempts += 1
+        entry.nextMs = System.currentTimeMillis() + delay
+        LogBus.log(
+            "[engine] '${ss.speaker.name}' dropped unexpectedly — " +
+                "reconnect attempt ${entry.attempts} in ${delay / 1000}s",
+        )
+    }
+
+    private fun processReconnects() {
+        if (reconnects.isEmpty()) return
+        val now = System.currentTimeMillis()
+        for ((key, entry) in reconnects) {
+            if (now < entry.nextMs) continue
+            if (broadcast == null) {
+                reconnects.remove(key)
+                continue
+            }
+            if (sessionFor(entry.speaker) != null) continue // live again
+            LogBus.log(
+                "[engine] reconnecting to '${entry.speaker.name}' " +
+                    "(attempt ${entry.attempts})",
+            )
+            entry.nextMs = now + 60_000L // re-arms on drop via schedule
+            startSpeaker(entry.speaker)
+        }
+    }
+
+    /** Nudge pending reconnects to fire on the next watchdog tick
+     *  (e.g. the network just came back). */
+    fun kickReconnects() {
+        val now = System.currentTimeMillis()
+        for (e in reconnects.values) {
+            if (e.nextMs > now) e.nextMs = now
+        }
+    }
+
+    private fun noteLearned(sp: Speaker, proto: AirProtocol) {
+        try {
+            learnedSaver?.invoke(sp, proto)
+        } catch (_: Exception) {
+        }
+    }
+
     // --- AirPlay: AP2 with RAOP fallback ----------------------------------
 
-    private fun runAirPlay(ss: SpeakerSession, source: BroadcastCapture) {
+    /**
+     * Authenticate to an AirPlay receiver, in order:
+     *  1. stored PIN pairing -> pair-verify (Apple TV / Mac path),
+     *  2. transient pairing, exactly as before (HomePod path) — unless
+     *     a manual PIN pairing was requested for this speaker,
+     *  3. when the receiver refuses transient with 470 (or PIN pairing
+     *     was requested manually): the PIN flow — ask for the on-screen
+     *     code, pair-setup, store the credentials, pair-verify.
+     * PIN-flow failures abort via [PinFlowAborted] (no RAOP fallback).
+     */
+    private fun establishAp2(
+        ss: SpeakerSession,
+        budgetMs: Int = 0,
+    ): Ap2Pairing.Established {
         val sp = ss.speaker
-        val consumer = source.newConsumer()
+        val identity = try {
+            identityProvider?.invoke()
+        } catch (_: Exception) {
+            null
+        }
+        val forced = forcePinKeys.remove(sp.key)
+        if (identity != null && !forced) {
+            val creds = try {
+                credentialsLoader?.invoke(sp)
+            } catch (_: Exception) {
+                null
+            }
+            if (creds != null) {
+                try {
+                    LogBus.log("[engine] '${sp.name}' has a stored PIN pairing — pair-verifying")
+                    return Ap2Pairing.connectVerified(sp.host, sp.port, creds, identity)
+                } catch (e: Exception) {
+                    LogBus.log(
+                        "[engine] pair-verify for '${sp.name}' failed " +
+                            "(${e.message}) — trying the regular pairing",
+                    )
+                }
+            }
+        }
+        if (!forced) {
+            try {
+                // Capped first attempt (RoutePolicy): only when a RAOP
+                // fallback exists — a silent AP2 port then costs the
+                // budget, not the full 12 s read timeout (issue #2).
+                return Ap2Pairing.connect(
+                    sp.host, sp.port,
+                    if (budgetMs > 0) budgetMs else 12000,
+                )
+            } catch (e: Ap2Pairing.PinRequired) {
+                LogBus.log(
+                    "[engine] '${sp.name}' requires PIN pairing — asking for the code",
+                )
+            }
+        } else {
+            LogBus.log("[engine] PIN pairing requested for '${sp.name}' — asking for the code")
+        }
+        // PIN flow: the only remaining path. Any failure here aborts.
+        if (identity == null) {
+            throw PinFlowAborted("PIN pairing is unavailable (no identity provider)")
+        }
+        val newCreds = try {
+            Ap2Pairing.pairSetupWithPin(sp.host, sp.port, identity) {
+                if (ss.stopRequested) {
+                    null
+                } else {
+                    try {
+                        pinProvider?.invoke(sp)
+                    } catch (_: Exception) {
+                        null
+                    }
+                }
+            }
+        } catch (e: Ap2Pairing.PairingFailed) {
+            throw PinFlowAborted(e.message ?: "PIN pairing failed")
+        }
+        try {
+            credentialsSaver?.invoke(sp, newCreds)
+            LogBus.log("[engine] stored the PIN pairing for '${sp.name}'")
+        } catch (e: Exception) {
+            LogBus.log("[engine] could not store the pairing for '${sp.name}': ${e.message}")
+        }
+        try {
+            return Ap2Pairing.connectVerified(sp.host, sp.port, newCreds, identity)
+        } catch (e: Exception) {
+            throw PinFlowAborted("paired, but pair-verify failed: ${e.message}")
+        }
+    }
+
+    /** Build the per-session PCM chain: hub consumer (group-aligned
+     *  when another AirPlay speaker is already streaming) wrapped in
+     *  the speaker-profile effects (delay / EQ / gentle start). */
+    private fun buildChain(
+        ss: SpeakerSession,
+        source: BroadcastCapture,
+    ): Ap2AudioSession.PcmSource {
+        val sp = ss.speaker
+        val groupActive = snapshot().any {
+            it !== ss && it.speaker.kind == SpeakerKind.AIRPLAY &&
+                it.state == State.STREAMING
+        }
+        val raw = if (groupActive) {
+            LogBus.log(
+                "[engine] '${sp.name}' joins the sync group " +
+                    "(aligned to the group's timeline)",
+            )
+            source.newAlignedConsumer()
+        } else {
+            source.newConsumer()
+        }
+        val profile = try {
+            profileLoader?.invoke(sp)
+        } catch (_: Exception) {
+            null
+        } ?: SpeakerProfile()
+        val fx = ProfiledConsumer(raw, profile, source.sampleRate)
+        ss.fx = fx
+        return fx
+    }
+
+    private class Ap2Outcome(
+        val streamed: Boolean,
+        val failure: Throwable?,
+    )
+
+    /** One AP2 attempt at [rate] feeding on [pcm]. Throws
+     *  [PinFlowAborted] through (the PIN flow is terminal by design). */
+    private fun attemptAp2(
+        ss: SpeakerSession,
+        pcm: Ap2AudioSession.PcmSource,
+        rate: Int,
+        capMs: Int,
+    ): Ap2Outcome {
+        val sp = ss.speaker
         val streamed = AtomicBoolean(false)
         val audioRef = java.util.concurrent.atomic.AtomicReference<Ap2AudioSession?>()
         var failure: Throwable? = null
         var est: Ap2Pairing.Established? = null
         try {
-            est = Ap2Pairing.connect(sp.host, sp.port)
-            if (ss.stopRequested) return
+            est = establishAp2(ss, capMs)
+            if (ss.stopRequested) return Ap2Outcome(false, null)
             val audio = Ap2AudioSession(
-                sp.host, est.localIp, est.channel, est.k64, consumer,
+                sp.host, est.localIp, est.channel, est.k64, pcm, rate,
             ) {
                 streamed.set(true)
+                ss.streamedOnce = true
                 ss.state = State.STREAMING
                 ss.protocol = "AirPlay 2"
+                reconnects.remove(sp.key)
                 val a = audioRef.get()
                 if (ss.volumePct != 100) a?.setVolumeDb(pctToDb(ss.volumePct))
-                NowPlaying.current?.let { info ->
+                val info = NowPlaying.current
+                if (info != null) {
                     a?.setMetadata(info.title, info.artist, info.album, info.artworkJpeg)
+                } else {
+                    // No track info from the source app: optionally send
+                    // the placeholder so the receiver still opens its
+                    // player UI (issue #4 suspect). Real metadata, when
+                    // it exists, always wins and is never delayed. A
+                    // receiver that refused the placeholder before
+                    // (400 — some Apple TVs) is not offered it again
+                    // (1.3.1, issue #5).
+                    val refused = try {
+                        placeholderRefusedLoader?.invoke(sp)
+                    } catch (_: Exception) {
+                        null
+                    } ?: false
+                    val ph = if (PlaceholderGate.shouldOffer(true, refused)) {
+                        try {
+                            placeholderProvider?.invoke()
+                        } catch (_: Exception) {
+                            null
+                        }
+                    } else {
+                        null
+                    }
+                    if (ph != null) {
+                        a?.setPlaceholderMetadata(ph.title, ph.artist, ph.artworkPng)
+                    }
                 }
                 notifyChanged()
             }
             audioRef.set(audio)
+            audio.onPlaceholderRefused = {
+                try {
+                    placeholderRefusedSaver?.invoke(sp)
+                } catch (_: Exception) {
+                }
+            }
             ss.live = Ap2Live(audio)
             if (ss.volumePct != 100) audio.setVolumeDb(pctToDb(ss.volumePct))
             audio.run()
@@ -394,18 +862,93 @@ object CastEngine {
             } catch (_: Exception) {
             }
         }
-        if (ss.stopRequested) return
-        if (streamed.get()) {
+        if (failure is PinFlowAborted) throw failure
+        return Ap2Outcome(streamed.get(), failure)
+    }
+
+    private fun runAirPlay(ss: SpeakerSession, source: BroadcastCapture) {
+        val sp = ss.speaker
+        val chain = buildChain(ss, source)
+        // RAOP always runs at 44.1 kHz (its wire format is fixed and
+        // rig-verified); from a 48 kHz hub it is fed via a resampler.
+        val raopPcm: Ap2AudioSession.PcmSource =
+            if (source.sampleRate != 44100) {
+                ResamplingConsumer(chain, source.sampleRate, 44100)
+            } else {
+                chain
+            }
+        val decision = RoutePolicy.decide(
+            hasCreds = try {
+                credentialsLoader?.invoke(sp) != null
+            } catch (_: Exception) {
+                false
+            },
+            pref = try {
+                protocolPrefLoader?.invoke(sp)
+            } catch (_: Exception) {
+                null
+            } ?: ProtocolPref.AUTO,
+            learned = try {
+                learnedLoader?.invoke(sp)
+            } catch (_: Exception) {
+                null
+            },
+            raopSplitPort = sp.raopPort != null,
+        )
+        LogBus.log(
+            "[engine] route for '${sp.name}': first=${decision.first} " +
+                "fallback=${decision.fallback} cap=${decision.capFirstAp2Ms}ms",
+        )
+
+        if (decision.first == AirProtocol.RAOP) {
+            try {
+                runRaop(ss, raopPcm)
+                noteLearned(sp, AirProtocol.RAOP)
+                return
+            } catch (e: Exception) {
+                if (ss.stopRequested) return
+                if (decision.fallback != AirProtocol.AP2) throw e
+                LogBus.log(
+                    "[engine] AirPlay 1 first for '${sp.name}' failed " +
+                        "(${e.message}) — falling through to AirPlay 2",
+                )
+                ss.live = null
+            }
+        }
+
+        var outcome = attemptAp2(ss, chain, source.sampleRate, decision.capFirstAp2Ms)
+        if (!outcome.streamed && !ss.stopRequested && source.sampleRate == 48000) {
+            // A receiver that refuses sr=48000 gets one retry at the
+            // proven 44.1 kHz through a resampling consumer (hi-res
+            // mode only — the default path never reaches this).
+            LogBus.log(
+                "[engine] 48 kHz AirPlay 2 to '${sp.name}' did not " +
+                    "start — retrying at 44.1 kHz",
+            )
+            ss.live = null
+            outcome = attemptAp2(
+                ss, ResamplingConsumer(chain, 48000, 44100), 44100, 0,
+            )
+        }
+        if (outcome.streamed) {
+            noteLearned(sp, AirProtocol.AP2)
             LogBus.log("[engine] AP2 session to '${sp.name}' ended")
             return
+        }
+        if (ss.stopRequested) return
+        if (decision.fallback != AirProtocol.RAOP) {
+            throw outcome.failure
+                ?: IllegalStateException("AirPlay 2 failed")
         }
         // AP2 never got audio flowing — fall back to classic RAOP.
         LogBus.log(
             "[engine] AirPlay 2 to '${sp.name}' failed " +
-                "(${failure?.message ?: "ended early"}) — trying AirPlay 1 (RAOP)",
+                "(${outcome.failure?.message ?: "ended early"}) " +
+                "— trying AirPlay 1 (RAOP)",
         )
         ss.live = null
-        runRaop(ss, source.newConsumer())
+        runRaop(ss, raopPcm)
+        noteLearned(sp, AirProtocol.RAOP)
     }
 
     private class Ap2Live(private val session: Ap2AudioSession) : LiveSession {
@@ -423,7 +966,7 @@ object CastEngine {
         }
     }
 
-    private fun runRaop(ss: SpeakerSession, consumer: BroadcastCapture.Consumer) {
+    private fun runRaop(ss: SpeakerSession, pcm: Ap2AudioSession.PcmSource) {
         val sp = ss.speaker
         // Split-service receivers (Kodi/LibreELEC, shairport) advertise
         // RAOP on a different port than AirPlay — the failover must aim
@@ -455,7 +998,7 @@ object CastEngine {
                     }
                     return
                 }
-                conn.pcmSource = RaopSourceAdapter(consumer)
+                conn.pcmSource = RaopSourceAdapter(pcm)
                 val live = RaopLive(conn)
                 ss.live = live
                 conn.startSender()
@@ -520,13 +1063,13 @@ object CastEngine {
         }
     }
 
-    /** Adapts a broadcast consumer to RAOP's split-channel PCM source. */
+    /** Adapts a PCM chunk source to RAOP's split-channel PCM source. */
     private class RaopSourceAdapter(
-        private val consumer: BroadcastCapture.Consumer,
+        private val source: Ap2AudioSession.PcmSource,
     ) : RaopConnection.PcmSource {
         override fun readFrame(left: ShortArray, right: ShortArray): Int {
-            if (consumer.finished) return -1
-            val chunk = consumer.nextInterleaved() ?: return -2
+            if (source.finished) return -1
+            val chunk = source.nextInterleaved() ?: return -2
             val n = minOf(AlacEncoder.FRAME_SAMPLES, chunk.size / 2)
             for (i in 0 until n) {
                 left[i] = chunk[2 * i]
@@ -543,6 +1086,18 @@ object CastEngine {
         val device = sp.dlna ?: throw IllegalStateException("missing DLNA endpoints")
         val url = streamUrlProvider?.invoke()
             ?: throw IllegalStateException("stream server not running")
+        // Issue #6: set the volume BEFORE Play so the renderer never
+        // starts at its own level. Best-effort — a renderer without
+        // RenderingControl ignores it (Dlna.setVolume returns
+        // silently) — and the post-play send below stays as
+        // belt-and-braces.
+        if (ss.volumePct != 100) {
+            try {
+                Dlna.setVolume(device, ss.volumePct)
+            } catch (e: Exception) {
+                LogBus.log("[engine] DLNA pre-play volume failed: ${e.message}")
+            }
+        }
         Dlna.play(device, url, "Airvia — device audio")
         val live = DlnaLive(device)
         ss.live = live
@@ -616,6 +1171,10 @@ object CastEngine {
             live.stop()
             return
         }
+        // Issue #6: send the session volume on connect like the other
+        // three paths — a new Chromecast speaker used to start at the
+        // receiver's own volume with nothing sent at all.
+        if (ss.volumePct != 100) live.setVolumePct(ss.volumePct)
         ss.protocol = "Chromecast"
         ss.state = State.STREAMING
         LogBus.log("[engine] Chromecast streaming to '${sp.name}' via $url")

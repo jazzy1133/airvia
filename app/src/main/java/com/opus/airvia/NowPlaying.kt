@@ -116,8 +116,45 @@ class NowPlayingWatcher(context: Context) {
 
     private val sessionsListener =
         MediaSessionManager.OnActiveSessionsChangedListener { controllers ->
-            refresh(controllers ?: emptyList())
+            val list = controllers ?: emptyList()
+            refresh(list)
+            // 1.3.2 volume re-claim: the same list change that feeds
+            // metadata also tells us when another app's session goes
+            // quiet mid-cast (see SessionReclaim).
+            reclaimCheck(list)
         }
+
+    /**
+     * Volume-key re-claim evaluation (1.3.2, issue #5): is any
+     * NON-Airvia session currently PLAYING? The answer feeds
+     * VolumeKeys' falling-edge tracker, which re-asserts our session
+     * exactly when a foreign session goes quiet while casting. Dead
+     * controllers throw on access and are treated as not playing.
+     */
+    private fun reclaimCheck(controllers: List<MediaController>) {
+        var foreignPlaying = false
+        for (c in controllers) {
+            try {
+                if (c.packageName != app.packageName &&
+                    c.playbackState?.state == PlaybackState.STATE_PLAYING
+                ) {
+                    foreignPlaying = true
+                    break
+                }
+            } catch (_: Exception) {
+            }
+        }
+        try {
+            VolumeKeys.onForeignSessionsChanged(foreignPlaying)
+        } catch (_: Exception) {
+        }
+    }
+
+    /** Same check over the currently tracked controllers (state changes). */
+    private fun reclaimCheckFromCallbacks() {
+        val controllers = synchronized(callbacks) { callbacks.keys.toList() }
+        reclaimCheck(controllers)
+    }
 
     fun start() {
         if (started) return
@@ -176,6 +213,9 @@ class NowPlayingWatcher(context: Context) {
 
                         override fun onPlaybackStateChanged(state: PlaybackState?) {
                             evaluate()
+                            // A state change is exactly when a foreign
+                            // session may have gone quiet mid-cast.
+                            reclaimCheckFromCallbacks()
                         }
 
                         override fun onSessionDestroyed() {

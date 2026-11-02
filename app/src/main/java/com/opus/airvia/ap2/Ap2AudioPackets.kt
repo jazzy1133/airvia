@@ -48,8 +48,14 @@ object Ap2AudioPackets {
      * so the receiver's lead erodes until it gives up and closes the
      * session (~32 s in the Oppo/HomePod logs of 2026-10-03).
      */
-    fun syncNtp(epochNtp: ULong, epochTs: ULong, rtpTs: ULong): ULong =
-        epochNtp + ts2ntp(rtpTs - epochTs, SAMPLE_RATE)
+    fun syncNtp(
+        epochNtp: ULong, epochTs: ULong, rtpTs: ULong,
+        rate: Int = SAMPLE_RATE,
+    ): ULong =
+        epochNtp + ts2ntp(rtpTs - epochTs, rate)
+
+    /** Playout latency in frames at [rate] (0.5 s + 1 s, as LATENCY). */
+    fun latencyFor(rate: Int): Int = rate / 2 + rate
 
     /**
      * Frames that must have been sent [elapsedNs] after stream start to
@@ -57,8 +63,8 @@ object Ap2AudioPackets {
      * this and pads SILENCE when the PCM source starves, so the timeline
      * never stalls (pyatv sends padding packets the same way).
      */
-    fun framesDue(elapsedNs: Long): Long =
-        if (elapsedNs <= 0L) 0L else elapsedNs * SAMPLE_RATE / 1_000_000_000L
+    fun framesDue(elapsedNs: Long, rate: Int = SAMPLE_RATE): Long =
+        if (elapsedNs <= 0L) 0L else elapsedNs * rate / 1_000_000_000L
 
     private fun putBe16(out: ByteArray, off: Int, v: Int) {
         out[off] = (v ushr 8).toByte()

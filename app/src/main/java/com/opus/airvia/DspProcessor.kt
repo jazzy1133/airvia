@@ -16,7 +16,7 @@ import kotlin.math.sin
  * All gains at 0 dB is bit-transparent to within float rounding (a peaking
  * filter with A = 1 has identical numerator and denominator).
  */
-class DspProcessor(private val sampleRate: Int = 44100) {
+class DspProcessor(val sampleRate: Int = 44100) {
     companion object {
         val BAND_FREQS = intArrayOf(60, 230, 910, 3600, 14000)
         const val BAND_COUNT = 5
@@ -133,7 +133,18 @@ class DspProcessor(private val sampleRate: Int = 44100) {
  * one [DspProcessor]. Settings persist through [Prefs] (see Prefs.eqGains).
  */
 object Eq {
-    val processor = DspProcessor()
+    var processor = DspProcessor()
+        private set
+
+    /** Recreate the processor at a new sample rate (hi-res mode),
+     *  keeping the current gains/preamp. No-op at the current rate. */
+    fun useRate(rate: Int) {
+        if (processor.sampleRate == rate) return
+        val g = processor.gainsDb()
+        val p = processor.preampDb
+        processor = DspProcessor(rate)
+        apply(g, p)
+    }
 
     data class Preset(val name: String, val gains: DoubleArray, val preampDb: Double)
 

@@ -1,9 +1,13 @@
 package com.opus.airvia
 
 import android.content.Context
+import android.net.ConnectivityManager
+import android.net.Network
 import android.net.nsd.NsdManager
 import android.net.nsd.NsdServiceInfo
 import android.net.wifi.WifiManager
+import android.os.Handler
+import android.os.Looper
 import java.util.ArrayDeque
 
 /** An AirPlay receiver found on the local network. */
@@ -13,6 +17,17 @@ data class Speaker(val name: String, val host: String, val port: Int) {
 
     /** RAOP TXT `et` encryption modes (AirPlay discovery), when known. */
     var et: String? = null
+
+    /**
+     * mDNS TXT `deviceid` of the receiver, when advertised (AirPlay
+     * services carry it). Stable across IP changes, so persistent HAP
+     * pairing credentials are keyed by it when present.
+     */
+    var deviceId: String? = null
+
+    /** Stable key for the persistent-pairing credential store. */
+    val pairKey: String
+        get() = deviceId?.takeIf { it.isNotBlank() } ?: "$name|$host"
 
     /**
      * Port of the same device's `_raop._tcp` service when it differs from
@@ -57,6 +72,13 @@ enum class SpeakerKind { AIRPLAY, DLNA, CHROMECAST }
  * at a time (NSD resolves are not parallel-safe on older Android),
  * preferring the clean `_airplay` display name over the `MAC@Name` form
  * `_raop` uses.
+ *
+ * First-launch robustness (1.3.1, issue #5): a browse that fails to
+ * START (the classic cold-process / Wi-Fi warm-up NSD failure) is
+ * retried with backoff instead of leaving the app browse-less until
+ * the next resume, and a network-available event re-kicks the browse
+ * (rate-limited) — first launch behaves like later launches. The
+ * merge/dedup logic is untouched by any of this.
  */
 class SpeakerDiscovery(
     context: Context,
@@ -72,11 +94,17 @@ class SpeakerDiscovery(
     @Volatile
     private var resolving = false
     private var running = false
-    private val listeners = ArrayList<NsdManager.DiscoveryListener>()
+    private val handler = Handler(Looper.getMainLooper())
 
     // One listener instance per service type (NSD rejects reusing a
-    // single listener for two simultaneous discoveries).
-    private fun makeListener() = object : NsdManager.DiscoveryListener {
+    // single listener for two simultaneous discoveries), tracked per
+    // type so a failed browse can be retried on its own (1.3.1).
+    private val activeListeners = HashMap<String, NsdManager.DiscoveryListener>()
+    private val startAttempts = HashMap<String, Int>()
+    private var networkCallback: ConnectivityManager.NetworkCallback? = null
+    private var lastNetworkKickMs = 0L
+
+    private fun makeListener(type: String) = object : NsdManager.DiscoveryListener {
         override fun onServiceFound(info: NsdServiceInfo) {
             synchronized(resolveQueue) { resolveQueue.add(info) }
             resolveNext()
@@ -92,13 +120,19 @@ class SpeakerDiscovery(
             }
         }
 
-        override fun onDiscoveryStarted(type: String) {
-            LogBus.log("[discover] browsing $type")
+        override fun onDiscoveryStarted(t: String) {
+            startAttempts.remove(t)
+            LogBus.log("[discover] browsing $t")
         }
 
         override fun onDiscoveryStopped(type: String) {}
-        override fun onStartDiscoveryFailed(type: String, code: Int) {
-            LogBus.log("[discover] start failed for $type: $code")
+        override fun onStartDiscoveryFailed(t: String, code: Int) {
+            LogBus.log("[discover] start failed for $t: $code")
+            // A failed start used to leave the app with NO browse
+            // until the next stop/start cycle — the first-launch
+            // "no speakers until I type the IP" failure (1.3.1).
+            if (activeListeners[t] === this) activeListeners.remove(t)
+            scheduleBrowseRetry(t)
         }
 
         override fun onStopDiscoveryFailed(type: String, code: Int) {}
@@ -114,32 +148,120 @@ class SpeakerDiscovery(
             }
         } catch (_: Exception) {
         }
-        for (type in listOf("_raop._tcp", "_airplay._tcp")) {
+        startBrowsing()
+        registerNetworkCallback()
+    }
+
+    private fun startBrowsing() {
+        for (type in SERVICE_TYPES) startBrowseType(type)
+    }
+
+    private fun startBrowseType(type: String) {
+        if (!running) return
+        if (activeListeners.containsKey(type)) return
+        try {
+            val listener = makeListener(type)
+            activeListeners[type] = listener
+            nsd.discoverServices(type, NsdManager.PROTOCOL_DNS_SD, listener)
+        } catch (e: Exception) {
+            LogBus.log("[discover] cannot browse $type: ${e.message}")
+            activeListeners.remove(type)
+            scheduleBrowseRetry(type)
+        }
+    }
+
+    /** Retry a browse that failed to start: 1.5 s, then 4 s, max 3. */
+    private fun scheduleBrowseRetry(type: String) {
+        if (!running) return
+        val attempt = (startAttempts[type] ?: 0) + 1
+        if (attempt > MAX_START_RETRIES) {
+            LogBus.log("[discover] giving up browsing $type after retries")
+            return
+        }
+        startAttempts[type] = attempt
+        handler.postDelayed({ startBrowseType(type) }, if (attempt == 1) 1500L else 4000L)
+    }
+
+    /**
+     * Stop the current browses and start fresh ones, KEEPING the
+     * multicast lock held (releasing/reacquiring it mid-restart is
+     * its own source of missed first packets). Used by the network
+     * callback, by the UI's zero-results re-check, and by Rescan.
+     */
+    fun restartBrowse() {
+        if (!running) return
+        stopBrowsing()
+        startAttempts.clear()
+        startBrowsing()
+    }
+
+    private fun stopBrowsing() {
+        for ((_, listener) in activeListeners) {
             try {
-                val listener = makeListener()
-                listeners.add(listener)
-                nsd.discoverServices(type, NsdManager.PROTOCOL_DNS_SD, listener)
-            } catch (e: Exception) {
-                LogBus.log("[discover] cannot browse $type: ${e.message}")
+                nsd.stopServiceDiscovery(listener)
+            } catch (_: Exception) {
             }
+        }
+        activeListeners.clear()
+    }
+
+    /**
+     * A network arriving after we started (first launch on a still-
+     * connecting Wi-Fi is the textbook case) re-kicks the browse.
+     * registerDefaultNetworkCallback reports the current network
+     * immediately, which doubles as a warm-up re-browse ~1.5 s after
+     * every start. Rate-limited to one kick per 10 s.
+     */
+    private fun registerNetworkCallback() {
+        if (networkCallback != null) return
+        val cm = app.getSystemService(ConnectivityManager::class.java) ?: return
+        val cb = object : ConnectivityManager.NetworkCallback() {
+            override fun onAvailable(network: Network) {
+                if (!running) return
+                val now = System.currentTimeMillis()
+                if (now - lastNetworkKickMs < 10_000L) return
+                lastNetworkKickMs = now
+                handler.postDelayed({
+                    if (running) {
+                        LogBus.log("[discover] network available — re-browsing")
+                        restartBrowse()
+                    }
+                }, 1500L)
+            }
+        }
+        try {
+            cm.registerDefaultNetworkCallback(cb)
+            networkCallback = cb
+        } catch (_: Exception) {
+        }
+    }
+
+    private fun unregisterNetworkCallback() {
+        val cb = networkCallback ?: return
+        networkCallback = null
+        try {
+            app.getSystemService(ConnectivityManager::class.java)
+                ?.unregisterNetworkCallback(cb)
+        } catch (_: Exception) {
         }
     }
 
     fun stop() {
         if (!running) return
         running = false
-        for (listener in listeners) {
-            try {
-                nsd.stopServiceDiscovery(listener)
-            } catch (_: Exception) {
-            }
-        }
-        listeners.clear()
+        handler.removeCallbacksAndMessages(null)
+        unregisterNetworkCallback()
+        stopBrowsing()
         try {
             multicastLock?.release()
         } catch (_: Exception) {
         }
         multicastLock = null
+    }
+
+    private companion object {
+        val SERVICE_TYPES = listOf("_raop._tcp", "_airplay._tcp")
+        const val MAX_START_RETRIES = 3
     }
 
     private fun resolveNext() {
@@ -164,16 +286,27 @@ class SpeakerDiscovery(
                         } catch (_: Exception) {
                             null
                         }
+                        val deviceId = try {
+                            info.attributes["deviceid"]?.toString(Charsets.UTF_8)
+                        } catch (_: Exception) {
+                            null
+                        }
                         synchronized(byEndpoint) {
                             val existing = byEndpoint[key]
                             // Prefer the name without the "MAC@" prefix.
                             if (existing == null || existing.name.contains("@")) {
                                 byEndpoint[key] = Speaker(name, host, info.port).apply {
                                     this.et = et
+                                    this.deviceId = deviceId
                                     this.isRaopService = isRaop
                                 }
-                            } else if (existing.et == null && et != null) {
-                                existing.et = et
+                            } else {
+                                if (existing.et == null && et != null) {
+                                    existing.et = et
+                                }
+                                if (existing.deviceId == null && deviceId != null) {
+                                    existing.deviceId = deviceId
+                                }
                             }
                             publish()
                         }
@@ -227,6 +360,7 @@ internal fun mergeDeviceSpeakers(raw: List<Speaker>): List<Speaker> {
         val merged = Speaker(primary.name, primary.host, primary.port)
         merged.kind = primary.kind
         merged.et = primary.et ?: raop?.et
+        merged.deviceId = primary.deviceId ?: raop?.deviceId
         merged.isRaopService = primary.isRaopService
         if (airplay != null && raop != null && raop.port != primary.port) {
             merged.raopPort = raop.port

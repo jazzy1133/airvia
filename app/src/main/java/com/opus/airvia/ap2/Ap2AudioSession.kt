@@ -2,6 +2,7 @@ package com.opus.airvia.ap2
 
 import com.opus.airvia.Dmap
 import com.opus.airvia.LogBus
+import com.opus.airvia.PlaceholderGate
 import java.io.ByteArrayOutputStream
 import java.net.DatagramPacket
 import java.net.DatagramSocket
@@ -42,6 +43,8 @@ class Ap2AudioSession(
     private val k64: ByteArray,
     /** Live PCM source (352-frame interleaved chunks) for Outro playback. */
     private val pcm: PcmSource,
+    /** Stream sample rate: 44100 (default, proven) or 48000 hi-res. */
+    private val sampleRate: Int = 44100,
     /** Called once when audio streaming actually starts. */
     private val onStreaming: () -> Unit = {},
 ) {
@@ -133,6 +136,31 @@ class Ap2AudioSession(
     @Volatile
     private var pendingArtwork: ByteArray? = null
 
+    /** Content-Type for [pendingArtwork]: real cover art is JPEG; the
+     *  placeholder logo is the app's PNG, sent byte-verbatim. */
+    @Volatile
+    private var pendingArtworkType: String = "image/jpeg"
+
+    /** True while [pendingMetadata] is the placeholder, not a real track. */
+    @Volatile
+    private var pendingPlaceholder: Boolean = false
+
+    /**
+     * Set when this receiver answers 400 to the placeholder (1.3.1):
+     * some receivers (an Apple TV in issue #5) refuse the placeholder
+     * SET_PARAMETERs that a HomePod accepts. Once refused, the
+     * placeholder is never queued again in this session, and the
+     * engine is told via [onPlaceholderRefused] so it can remember the
+     * refusal per receiver across sessions. Real metadata is a
+     * different path ([setMetadata]) and is never affected.
+     */
+    private val placeholderRefusedHere =
+        java.util.concurrent.atomic.AtomicBoolean(false)
+
+    /** Invoked once when the receiver refuses the placeholder (400). */
+    @Volatile
+    var onPlaceholderRefused: (() -> Unit)? = null
+
     /**
      * Push now-playing metadata (DMAP) + artwork (JPEG) to the receiver.
      * Non-blocking since 1.2.1 (see [setVolumeDb]): this only records
@@ -143,7 +171,39 @@ class Ap2AudioSession(
     fun setMetadata(title: String, artist: String, album: String, artworkJpeg: ByteArray?) {
         pendingMetadata = Triple(title, artist, album)
         pendingArtwork = artworkJpeg
+        pendingArtworkType = "image/jpeg"
+        pendingPlaceholder = false
         metadataDirty.set(true)
+    }
+
+    /**
+     * Queue the placeholder track info ("Airvia" + the app logo) used
+     * when the source app provides no now-playing metadata at stream
+     * start. Only ever queued when there is NO real metadata — a later
+     * [setMetadata] replaces it wholesale.
+     */
+    fun setPlaceholderMetadata(title: String, artist: String, artworkPng: ByteArray?) {
+        if (placeholderRefusedHere.get()) return
+        pendingMetadata = Triple(title, artist, "")
+        pendingArtwork = artworkPng
+        pendingArtworkType = "image/png"
+        pendingPlaceholder = true
+        metadataDirty.set(true)
+    }
+
+    /** Streaming-thread only: a 400 on the placeholder path. Log once,
+     *  drop the queued placeholder for this session, and tell the
+     *  engine so the refusal is remembered for this receiver. */
+    private fun notePlaceholderRefused(status: Int) {
+        if (!placeholderRefusedHere.compareAndSet(false, true)) return
+        LogBus.log(
+            "[$TAG] receiver refused placeholder track info " +
+                "(HTTP $status) — remembering it; not sending again",
+        )
+        try {
+            onPlaceholderRefused?.invoke()
+        } catch (_: Exception) {
+        }
     }
 
     /**
@@ -153,19 +213,34 @@ class Ap2AudioSession(
     private fun flushMetadataNow(): Boolean {
         val meta = pendingMetadata ?: return true
         val art = pendingArtwork
+        val artType = pendingArtworkType
+        val isPlaceholder = pendingPlaceholder
         metadataDirty.set(false)
         return try {
+            var metaStatus: Int? = null
+            var artStatus: Int? = null
             val body = Dmap.metadataBody(meta.first, meta.second, meta.third)
             if (body.isNotEmpty()) {
                 val resp = rtsp(
                     "SET_PARAMETER", rtspUri, body, "application/x-dmap-tagged",
                 )
+                metaStatus = resp.status
                 LogBus.log(
                     "[$TAG] SET_PARAMETER metadata '${meta.first}' -> ${resp.status}")
             }
             if (art != null && art.isNotEmpty()) {
-                val resp = rtsp("SET_PARAMETER", rtspUri, art, "image/jpeg")
+                val resp = rtsp("SET_PARAMETER", rtspUri, art, artType)
+                artStatus = resp.status
                 LogBus.log("[$TAG] SET_PARAMETER artwork (${art.size}B) -> ${resp.status}")
+            }
+            if (isPlaceholder) {
+                val refused = listOfNotNull(metaStatus, artStatus)
+                    .firstOrNull { PlaceholderGate.isRefusal(it) }
+                if (refused != null) {
+                    notePlaceholderRefused(refused)
+                } else {
+                    LogBus.log("[$TAG] placeholder metadata sent (no track info from source app)")
+                }
             }
             true
         } catch (e: Exception) {
@@ -425,11 +500,11 @@ class Ap2AudioSession(
                     "controlPort" to controlPort,
                     "ct" to 2,
                     "isMedia" to true,
-                    "latencyMax" to 88200,
-                    "latencyMin" to 11025,
+                    "latencyMax" to sampleRate * 2,
+                    "latencyMin" to sampleRate / 4,
                     "shk" to audioKey,
                     "spf" to 352,
-                    "sr" to 44100,
+                    "sr" to sampleRate,
                     "type" to 0x60,
                     "supportsDynamicStreamID" to false,
                     "streamConnectionID" to sessionId.toLong(),
@@ -465,7 +540,7 @@ class Ap2AudioSession(
             // framesSent; owntone: 88200 + pos), NOT NTP-derived. The huge
             // NTP value truncated to 32 bits is garbage the HomePod can't
             // correlate with sync packets -> silence.
-            val startTs = Ap2AudioPackets.LATENCY.toULong()
+            val startTs = Ap2AudioPackets.latencyFor(sampleRate).toULong()
             LogBus.log("[$TAG] audio step 6: streaming live PCM (ssrc=$ssrc ts0=$startTs)")
             streamAudio(
                 audioSock, controlSock, timingSock,
@@ -668,9 +743,9 @@ class Ap2AudioSession(
             // until it closed the control channel at ~36 s.
             val epochNtp = Ap2AudioPackets.ntpNow()
             fun syncNtpFor(rtpTs: ULong): ULong =
-                Ap2AudioPackets.syncNtp(epochNtp, startTs, rtpTs)
+                Ap2AudioPackets.syncNtp(epochNtp, startTs, rtpTs, sampleRate)
 
-            val sync0 = Ap2AudioPackets.syncPacket(true, startTs.toLong(), Ap2AudioPackets.LATENCY.toLong(), syncNtpFor(startTs))
+            val sync0 = Ap2AudioPackets.syncPacket(true, startTs.toLong(), Ap2AudioPackets.latencyFor(sampleRate).toLong(), syncNtpFor(startTs))
             run {
                 val hex = sync0.joinToString("") { "%02x".format(it) }
                 LogBus.log("[$TAG] DIAG sync0 hex20=$hex")
@@ -718,7 +793,7 @@ class Ap2AudioSession(
                 // the same way). The pre-1.2.2 loop subtracted source
                 // wait time from the pacing clock, permanently shifting
                 // the timeline behind the wall clock on every hiccup.
-                val due = Ap2AudioPackets.framesDue(System.nanoTime() - t0)
+                val due = Ap2AudioPackets.framesDue(System.nanoTime() - t0, sampleRate)
                 var sentThisTick = 0
                 while (framesSent + 352 <= due && sentThisTick < 16 && !stopRequested) {
                     val chunk: ShortArray
@@ -758,7 +833,7 @@ class Ap2AudioSession(
                     lastSyncMs = nowMs
                     val rtpTs = startTs + framesSent.toULong()
                     val sp = Ap2AudioPackets.syncPacket(
-                        false, rtpTs.toLong(), Ap2AudioPackets.LATENCY.toLong(), syncNtpFor(rtpTs))
+                        false, rtpTs.toLong(), Ap2AudioPackets.latencyFor(sampleRate).toLong(), syncNtpFor(rtpTs))
                     controlSock.send(DatagramPacket(sp, sp.size, serverControlAddr))
                 }
                 if (nowMs - lastFeedbackMs >= 2000) {

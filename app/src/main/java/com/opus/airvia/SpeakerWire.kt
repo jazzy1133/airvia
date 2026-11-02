@@ -21,6 +21,7 @@ internal object SpeakerWire {
     const val KEY_NAME = "name"
     const val KEY_KIND = "kind"
     const val KEY_ET = "et"
+    const val KEY_DEVICE_ID = "deviceId"
     const val KEY_RAOP_PORT = "raopPort"
     const val KEY_RAOP_ET = "raopEt"
     const val KEY_DLNA_UDN = "dlnaUdn"
@@ -36,6 +37,10 @@ internal object SpeakerWire {
         m[KEY_NAME] = sp.name
         m[KEY_KIND] = sp.kind.name
         m[KEY_ET] = sp.et
+        // Pairing-credential key: without it the service-side speaker
+        // falls back to name|host keying and stored HAP credentials
+        // keyed by deviceid would never be found.
+        m[KEY_DEVICE_ID] = sp.deviceId
         // Split-service RAOP endpoint (Kodi/LibreELEC): without these the
         // rebuilt speaker defaults them to null and the RAOP failover
         // dials the AirPlay port that just rejected it (issue #2).
@@ -64,6 +69,7 @@ internal object SpeakerWire {
             SpeakerKind.AIRPLAY
         }
         sp.et = m[KEY_ET] as? String
+        sp.deviceId = m[KEY_DEVICE_ID] as? String
         sp.raopPort = m[KEY_RAOP_PORT] as? Int
         sp.raopEt = m[KEY_RAOP_ET] as? String
         sp.castRouteId = m[KEY_CAST_ROUTE] as? String
